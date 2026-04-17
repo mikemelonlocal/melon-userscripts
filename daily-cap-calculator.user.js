@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Daily Cap Calculator - Melon Local (Enhanced)
 // @namespace    https://thepatch.melonlocal.com/
-// @version      3.3.0
+// @version      3.4.0
 // @description  Paces budgets evenly through end of month. Auto-fills from page data. Refresh + Freeze. Enhanced with auto-save, export/import, keyboard shortcuts, and improved UX.
 // @author       Melon Local
 // @match        https://thepatch.melonlocal.com/*
@@ -738,10 +738,12 @@
       document.querySelectorAll('.dcc-product-block').forEach(productBlock => {
         const budgets = [];
         productBlock.querySelectorAll('.dcc-budget-rows-list .dcc-budget-row').forEach(row => {
+          const rawSpent = row.dataset.spent;
           budgets.push({
             desc: row.querySelector('.calc-budget-desc')?.value || '',
             cap: row.querySelector('.calc-budget-cap')?.value || '',
-            weekdays: row.querySelector('.calc-budget-weekdays')?.checked || false
+            weekdays: row.querySelector('.calc-budget-weekdays')?.checked || false,
+            spent: rawSpent === '' || rawSpent === undefined ? null : parseFloat(rawSpent)
           });
         });
 
@@ -902,6 +904,54 @@
       }
     },
 
+    // Days from the 1st of the month through (and including) `dateStr`
+    countElapsedDays(dateStr, weekdaysOnly) {
+      if (!dateStr) return null;
+      try {
+        const [year, month, day] = dateStr.split('-').map(Number);
+        if (!year || !month || !day) return null;
+        let count = 0;
+        for (let i = 1; i <= day; i++) {
+          const dow = new Date(year, month - 1, i).getDay();
+          if (!weekdaysOnly || (dow !== 0 && dow !== 6)) count++;
+        }
+        return count;
+      } catch {
+        return null;
+      }
+    },
+
+    // Total days in the month (full month, not just remaining)
+    countTotalDaysInMonth(dateStr, weekdaysOnly) {
+      if (!dateStr) return null;
+      try {
+        const [year, month] = dateStr.split('-').map(Number);
+        if (!year || !month) return null;
+        const daysInMonth = new Date(year, month, 0).getDate();
+        let count = 0;
+        for (let i = 1; i <= daysInMonth; i++) {
+          const dow = new Date(year, month - 1, i).getDay();
+          if (!weekdaysOnly || (dow !== 0 && dow !== 6)) count++;
+        }
+        return count;
+      } catch {
+        return null;
+      }
+    },
+
+    // Time-adjusted pacing: 100 = on pace, >100 = ahead (overspending), <100 = behind
+    computePacing(spent, cap, elapsedDays, totalDays) {
+      if (!(spent >= 0) || !(cap > 0) || !(elapsedDays > 0) || !(totalDays > 0)) return null;
+      return (spent / cap) / (elapsedDays / totalDays) * 100;
+    },
+
+    pacingStyle(pct) {
+      if (pct == null || !isFinite(pct)) return { color: '#6b7280', label: '—' };
+      if (pct < 90) return { color: '#2563eb', label: 'behind' };
+      if (pct > 110) return { color: '#dc2626', label: 'ahead' };
+      return { color: '#16a34a', label: 'on pace' };
+    },
+
     validateInput(input) {
       const value = parseFloat(input.value);
       const isValid = !input.value || (!isNaN(value) && value > 0);
@@ -937,6 +987,10 @@
         const cpe = parseFloat(productBlock.querySelector('.dcc-cpe-input').value);
         const cpeLabel = Utils.escapeHtml(productBlock.querySelector('.dcc-event-type').value.trim() || 'events');
 
+        // For overall pacing — need both TSA and Remaining regardless of selected mode
+        const totalValInput = parseFloat(productBlock.querySelector('.dcc-input-total').value);
+        const remainingValInput = parseFloat(productBlock.querySelector('.dcc-input-remaining').value);
+
         const budgets = [];
         let totalMonthlyCap = 0;
 
@@ -944,9 +998,11 @@
           const desc = row.querySelector('.calc-budget-desc').value.trim() || 'Budget';
           const cap = parseFloat(row.querySelector('.calc-budget-cap').value);
           const weekdays = row.querySelector('.calc-budget-weekdays').checked;
+          const rawSpent = row.dataset.spent;
+          const spent = rawSpent === '' || rawSpent === undefined ? null : parseFloat(rawSpent);
 
           if (!isNaN(cap) && cap > 0) {
-            budgets.push({ desc, cap, weekdays });
+            budgets.push({ desc, cap, weekdays, spent: isNaN(spent) ? null : spent });
             totalMonthlyCap += cap;
           }
         });
@@ -966,11 +1022,16 @@
           return;
         }
 
-        // Precompute per-budget day counts — bail if any are invalid
+        // Precompute per-budget day counts + pacing — bail if days are invalid
         let anyInvalidDays = false;
         budgets.forEach(b => {
           b.days = this.countDays(dateValue, b.weekdays);
           if (b.days === null || b.days <= 0) anyInvalidDays = true;
+          const elapsed = this.countElapsedDays(dateValue, b.weekdays);
+          const total = this.countTotalDaysInMonth(dateValue, b.weekdays);
+          b.pacingPct = (b.spent != null && !isNaN(b.spent))
+            ? this.computePacing(b.spent, b.cap, elapsed, total)
+            : null;
         });
 
         if (anyInvalidDays) {
@@ -979,6 +1040,19 @@
           </div>`;
           return;
         }
+
+        // Overall pacing (calendar days): prefer sum of per-budget spend; fall back to TSA − Remaining
+        const allSpentKnown = budgets.length > 0 && budgets.every(b => b.spent != null && !isNaN(b.spent));
+        let overallSpent = null;
+        if (allSpentKnown) {
+          overallSpent = budgets.reduce((s, b) => s + b.spent, 0);
+        } else if (!isNaN(totalValInput) && !isNaN(remainingValInput) && totalValInput > 0) {
+          overallSpent = Math.max(0, totalValInput - remainingValInput);
+        }
+        const overallCap = !isNaN(totalValInput) && totalValInput > 0 ? totalValInput : totalMonthlyCap;
+        const overallElapsed = this.countElapsedDays(dateValue, false);
+        const overallTotal = this.countTotalDaysInMonth(dateValue, false);
+        const overallPacing = this.computePacing(overallSpent, overallCap, overallElapsed, overallTotal);
 
         const modeLabel = mode === 'total'
           ? '<span style="background:#dbeafe;color:#1d4ed8;border-radius:4px;padding:1px 6px;font-size:10px;font-weight:700;margin-left:4px;display:inline-block;">Total Spend</span>'
@@ -1013,24 +1087,40 @@
             ? `<td class="dcc-event-cap-val">${Math.round(dailyCap / cpe)}</td>`
             : '';
 
+          const pStyle = this.pacingStyle(budget.pacingPct);
+          const pacingCell = budget.pacingPct != null
+            ? `<td style="color:${pStyle.color};font-weight:700;" title="Spent $${budget.spent.toFixed(2)} of $${budget.cap.toFixed(2)} (${(budget.spent / budget.cap * 100).toFixed(0)}% of cap)">${budget.pacingPct.toFixed(0)}%</td>`
+            : '<td style="color:#9ca3af;">—</td>';
+
           tableRows += `
             <tr>
               <td>${Utils.escapeHtml(budget.desc)}</td>
               <td>$${budget.cap.toFixed(2)}</td>
               <td>${(share * 100).toFixed(1)}%</td>
               <td>${daysCell}</td>
+              ${pacingCell}
               <td class="dcc-daily-cap-val">$${dailyCap.toFixed(2)}</td>
               ${eventCapCell}
             </tr>
           `;
         });
 
-        const footerColspan = useEventCap && !isNaN(cpe) && cpe > 0 ? 6 : 5;
+        const footerColspan = useEventCap && !isNaN(cpe) && cpe > 0 ? 7 : 6;
         const eventFooter = useEventCap && !isNaN(cpe) && cpe > 0
           ? `<tr><td colspan="${footerColspan}" style="padding-top:6px;font-size:10px;color:#92400e;background:#fffbeb;">
               &#128200; Event Cap = Daily Cap &divide; $${cpe.toFixed(2)} cost per ${cpeLabel.toLowerCase().replace(/s$/, '')} (prev. month avg)
             </td></tr>`
           : '';
+
+        // Overall pacing summary line (only when we have enough data to compute it)
+        let overallPacingLine = '';
+        if (overallPacing != null && overallSpent != null && overallCap > 0) {
+          const oStyle = this.pacingStyle(overallPacing);
+          overallPacingLine = `<div style="font-size:11px;margin-top:3px;">
+            Overall pacing: <strong style="color:${oStyle.color};">${overallPacing.toFixed(0)}% · ${oStyle.label}</strong>
+            <span style="color:#6b7280;"> · spent $${overallSpent.toFixed(2)} of $${overallCap.toFixed(2)} (${(overallSpent / overallCap * 100).toFixed(0)}%)</span>
+          </div>`;
+        }
 
         html += `
           <div style="background:#f0fdf4;border:1.5px solid #bbf7d0;border-radius:8px;padding:11px 13px;margin-bottom:10px;">
@@ -1042,6 +1132,7 @@
             <div class="dcc-result-summary">
               <strong>$${spendValue.toFixed(2)}</strong> across <strong>${budgets.length} budget${budgets.length !== 1 ? 's' : ''}</strong>
             </div>
+            ${overallPacingLine}
             <table class="dcc-results-table">
               <thead>
                 <tr>
@@ -1049,6 +1140,7 @@
                   <th>Monthly Cap</th>
                   <th>Share</th>
                   <th>Days</th>
+                  <th title="Time-adjusted pacing: 100% = on pace, &gt;110% = ahead, &lt;90% = behind">Pacing</th>
                   <th>Daily Cap</th>
                   ${eventCapHeader}
                 </tr>
@@ -1104,11 +1196,25 @@
             const nameLower = name.toLowerCase();
             const weekdaysDefault = nameLower.includes('call') || nameLower.includes('lead');
 
-            const budgets = [];
-            const rows = [...section.querySelectorAll('tbody tr, table tr')]
-              .filter(row => row.querySelectorAll('td').length >= 5);
+            // Per-table: detect the "Spend" column index via header text so pacing works
+            // even if column positions shift. Collect rows with their resolved spendIdx.
+            const scoredRows = [];
+            [...section.querySelectorAll('table')].forEach(table => {
+              const headerRow = table.querySelector('thead tr') || table.querySelector('tr');
+              const headerCells = headerRow ? [...headerRow.querySelectorAll('th, td')] : [];
+              const spendIdx = headerCells.findIndex(c => {
+                const t = c.textContent.trim().toLowerCase();
+                return /\bspend\b|\bspent\b/.test(t) && !/(per|cost|daily)/.test(t);
+              });
+              [...table.querySelectorAll('tr')].forEach(row => {
+                if (row.querySelectorAll('td').length >= 5) {
+                  scoredRows.push({ row, spendIdx });
+                }
+              });
+            });
 
-            rows.forEach(row => {
+            const budgets = [];
+            scoredRows.forEach(({ row, spendIdx }) => {
               const cells = [...row.querySelectorAll('td')];
               const desc = cells[0]?.textContent.trim();
               const capText = cells[3]?.textContent || '';
@@ -1119,8 +1225,15 @@
                 cap = tsa;
               }
 
+              const spentVal = spendIdx >= 0 ? Utils.parseMoney(cells[spendIdx]?.textContent) : NaN;
+
               if (desc && !isNaN(cap) && cap > 0) {
-                budgets.push({ desc, cap, weekdays: weekdaysDefault });
+                budgets.push({
+                  desc,
+                  cap,
+                  weekdays: weekdaysDefault,
+                  spent: isNaN(spentVal) ? null : spentVal
+                });
               }
             });
 
@@ -1195,19 +1308,27 @@
                 const isCallOnly = /call\s*only/i.test(row.textContent);
                 const weekdays = isCallOnly || productLevelWeekdays;
 
-                // When an <i> element is present, it holds the actual monthly cap (spend ≠ cap)
+                // cells[6] format: "$<spent> (<pct>%)" optionally followed by "<i>$<cap></i>" when spend ≠ cap
                 const capCell = cells[6];
-                let cap = NaN;
+                const spentMatch = capCell?.textContent.match(/\$([0-9,]+\.?[0-9]*)/);
+                const spent = spentMatch ? parseFloat(spentMatch[1].replace(/,/g, '')) : null;
+
                 const iEl = capCell?.querySelector('i');
+                let cap = NaN;
                 if (iEl) {
                   cap = parseFloat(iEl.textContent.replace(/[^0-9.]/g, ''));
-                } else {
-                  const capMatch = capCell?.textContent.match(/\$([0-9,]+\.?[0-9]*)/);
-                  if (capMatch) cap = parseFloat(capMatch[1].replace(/,/g, ''));
+                } else if (spent != null && !isNaN(spent)) {
+                  // No <i> tag means spend equals cap
+                  cap = spent;
                 }
 
                 if (desc && !isNaN(cap) && cap > 0) {
-                  budgets.push({ desc, cap, weekdays });
+                  budgets.push({
+                    desc,
+                    cap,
+                    weekdays,
+                    spent: spent != null && !isNaN(spent) ? spent : null
+                  });
                 }
               });
 
@@ -1314,11 +1435,14 @@
   // ============================================================================
 
   const UI = {
-    addBudgetRow(listEl, desc = '', cap = '', weekdays = false) {
+    addBudgetRow(listEl, desc = '', cap = '', weekdays = false, spent = null) {
       State.budgetCounter++;
       const row = document.createElement('div');
       row.className = 'dcc-budget-row';
       row.id = `brow-${State.budgetCounter}`;
+      if (spent !== null && spent !== undefined && !isNaN(spent)) {
+        row.dataset.spent = String(spent);
+      }
 
       const descInput = document.createElement('input');
       descInput.type = 'text';
@@ -1507,7 +1631,8 @@
           budgetsList,
           budget.desc,
           budget.cap,
-          budget.weekdays !== undefined ? budget.weekdays : weekdaysDefault
+          budget.weekdays !== undefined ? budget.weekdays : weekdaysDefault,
+          budget.spent
         ));
       } else {
         this.addBudgetRow(budgetsList, '', '', weekdaysDefault);
