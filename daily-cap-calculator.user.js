@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Daily Cap Calculator - Melon Local (Enhanced)
 // @namespace    https://thepatch.melonlocal.com/
-// @version      3.4.0
+// @version      3.5.0
 // @description  Paces budgets evenly through end of month. Auto-fills from page data. Refresh + Freeze. Enhanced with auto-save, export/import, keyboard shortcuts, and improved UX.
 // @author       Melon Local
 // @match        https://thepatch.melonlocal.com/*
@@ -1874,7 +1874,11 @@
   // HASH CHANGE DETECTION
   // ============================================================================
 
+  let hashListenerAdded = false;
+
   function setupHashChangeListener() {
+    if (hashListenerAdded) return; // Only register once across recreations
+    hashListenerAdded = true;
     let settleTimeout = null;
     let fallbackTimeout = null;
     let activeObserver = null;
@@ -1931,6 +1935,91 @@
       // Fallback: always refresh within 1.5s even if no mutations are observed
       fallbackTimeout = setTimeout(() => refresh('fallback timeout'), 1500);
     });
+  }
+
+  // ============================================================================
+  // SPA NAVIGATION DETECTION
+  // ============================================================================
+
+  function setupNavigationListener() {
+    let lastPath = window.location.pathname;
+
+    function onPathChange() {
+      const newPath = window.location.pathname;
+      if (newPath === lastPath) return; // Only a hash change — hashchange listener handles those
+      lastPath = newPath;
+
+      Utils.log('SPA path change detected:', newPath);
+
+      const calc = document.getElementById('daily-cap-calculator');
+
+      if (!isAllowedPage()) {
+        // Navigated away from an allowed page — hide the calculator
+        if (calc) calc.style.display = 'none';
+        return;
+      }
+
+      // Navigated to an allowed page
+      if (!calc) {
+        // Calculator was never created (user started on a non-allowed page) — create it now
+        Utils.log('Calculator missing after SPA nav — creating');
+        window[CONFIG.INIT_FLAG] = false;
+        setTimeout(smartInit, 300);
+        return;
+      }
+
+      // Calculator already exists — show/hide per hash and refresh data
+      const visible = shouldShowCalculator();
+      calc.style.display = visible ? '' : 'none';
+
+      if (!visible || State.frozen) return;
+
+      Utils.log('Refreshing calculator data after SPA navigation');
+      State.dom.results.style.display = 'none';
+      State.dom.results.innerHTML = '';
+
+      // Single-fire refresh with MutationObserver + fallback, same pattern as hash listener
+      let navRefreshed = false;
+      let navSettleTimer = null;
+      let navObs = null;
+
+      const doNavRefresh = (reason) => {
+        if (navRefreshed) return;
+        navRefreshed = true;
+        if (navObs) { navObs.disconnect(); navObs = null; }
+        if (navSettleTimer) { clearTimeout(navSettleTimer); navSettleTimer = null; }
+        Utils.log('Populating after SPA navigation:', reason);
+        UI.populateFromPage();
+      };
+
+      navObs = new MutationObserver(() => {
+        if (navSettleTimer) clearTimeout(navSettleTimer);
+        navSettleTimer = setTimeout(() => doNavRefresh('content settled'), 500);
+      });
+
+      const root = document.querySelector('.main-content, main, #main, .content') || document.body;
+      navObs.observe(root, { childList: true, subtree: true });
+
+      // Fallback: always refresh within 1.5 s even if no mutations are observed
+      setTimeout(() => doNavRefresh('fallback'), 1500);
+    }
+
+    // Intercept SPA pushState navigation (clicking links, programmatic nav)
+    const origPush = history.pushState.bind(history);
+    history.pushState = function (...args) {
+      origPush(...args);
+      setTimeout(onPathChange, 0);
+    };
+
+    // Intercept replaceState (some SPAs use this instead of pushState)
+    const origReplace = history.replaceState.bind(history);
+    history.replaceState = function (...args) {
+      origReplace(...args);
+      setTimeout(onPathChange, 0);
+    };
+
+    // Handle browser Back/Forward buttons
+    window.addEventListener('popstate', onPathChange);
   }
 
   // ============================================================================
@@ -2158,6 +2247,10 @@
   // ============================================================================
   // START
   // ============================================================================
+
+  // Always set up SPA navigation detection so the calculator responds to
+  // pushState/popstate regardless of which page the user lands on first.
+  setupNavigationListener();
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', () => {
