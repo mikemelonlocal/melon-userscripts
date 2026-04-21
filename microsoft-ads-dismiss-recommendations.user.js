@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Microsoft Ads - Dismiss All Recommendations
 // @namespace    http://tampermonkey.net/
-// @version      1.8
+// @version      1.9
 // @description  Adds a "Dismiss All" button to the Microsoft Advertising recommendations page
 // @author       You
 // @match        https://ui.ads.microsoft.com/*recommendations*
@@ -15,6 +15,7 @@
   'use strict';
 
   let dismissObserver = null;
+  let isRunning = false;
 
   async function waitFor(selector, filterFn, timeout = 3000) {
     const start = performance.now();
@@ -148,12 +149,20 @@
     return true;
   }
 
-  async function runDismissAll() {
+  function updateButton(text, { running } = {}) {
     const btn = document.getElementById('tamper-dismiss-all-btn');
-    if (!btn || btn.dataset.running === 'true') return;
-    btn.dataset.running = 'true';
-    btn.disabled = true;
-    dismissObserver?.disconnect();
+    if (!btn) return;
+    if (text != null) btn.textContent = text;
+    if (running != null) {
+      btn.disabled = running;
+      btn.dataset.running = running ? 'true' : 'false';
+    }
+  }
+
+  async function runDismissAll() {
+    if (isRunning) return;
+    isRunning = true;
+    updateButton(null, { running: true });
 
     // Clear any prior skip marks so a fresh run re-evaluates cards.
     document.querySelectorAll('button.iconba-More[data-dismiss-skipped]')
@@ -164,52 +173,59 @@
     let bulkChoice = null; // 'dismiss-all' | 'skip-all' | null
     let cancelled = false;
 
-    while (count + skipped < 200) {
-      const moreBtn = document.querySelector('button.iconba-More:not([data-dismiss-skipped])');
-      if (!moreBtn) break;
+    try {
+      while (count + skipped < 200) {
+        const moreBtn = document.querySelector('button.iconba-More:not([data-dismiss-skipped])');
+        if (!moreBtn) break;
 
-      btn.textContent = 'Dismissing... (' + count + ' done' + (skipped ? ', ' + skipped + ' skipped' : '') + ')';
+        updateButton(
+          'Dismissing... (' + count + ' done' + (skipped ? ', ' + skipped + ' skipped' : '') + ')',
+          { running: true }
+        );
 
-      if (isNegativeKeywordCard(moreBtn)) {
-        let action;
-        if (bulkChoice === 'dismiss-all') action = 'dismiss';
-        else if (bulkChoice === 'skip-all') action = 'skip';
-        else {
-          action = await askUser(
-            'This recommendation involves negative keywords. Dismissing it means the suggested negative-keyword changes will not be applied.',
-            [
-              { label: 'Skip', value: 'skip' },
-              { label: 'Skip all', value: 'skip-all' },
-              { label: 'Dismiss', value: 'dismiss', primary: true },
-              { label: 'Dismiss all', value: 'dismiss-all' },
-              { label: 'Cancel run', value: 'cancel' },
-            ]
-          );
-          if (action === 'dismiss-all') { bulkChoice = 'dismiss-all'; action = 'dismiss'; }
-          else if (action === 'skip-all') { bulkChoice = 'skip-all'; action = 'skip'; }
+        if (isNegativeKeywordCard(moreBtn)) {
+          let action;
+          if (bulkChoice === 'dismiss-all') action = 'dismiss';
+          else if (bulkChoice === 'skip-all') action = 'skip';
+          else {
+            action = await askUser(
+              'This recommendation involves negative keywords. Dismissing it means the suggested negative-keyword changes will not be applied.',
+              [
+                { label: 'Skip', value: 'skip' },
+                { label: 'Skip all', value: 'skip-all' },
+                { label: 'Dismiss', value: 'dismiss', primary: true },
+                { label: 'Dismiss all', value: 'dismiss-all' },
+                { label: 'Cancel run', value: 'cancel' },
+              ]
+            );
+            if (action === 'dismiss-all') { bulkChoice = 'dismiss-all'; action = 'dismiss'; }
+            else if (action === 'skip-all') { bulkChoice = 'skip-all'; action = 'skip'; }
+          }
+
+          if (action === 'cancel') { cancelled = true; break; }
+          if (action === 'skip') {
+            moreBtn.setAttribute('data-dismiss-skipped', 'true');
+            skipped++;
+            continue;
+          }
         }
 
-        if (action === 'cancel') { cancelled = true; break; }
-        if (action === 'skip') {
-          moreBtn.setAttribute('data-dismiss-skipped', 'true');
-          skipped++;
-          continue;
-        }
+        if (await dismissOneCard(moreBtn)) count++;
+        else break;
       }
-
-      if (await dismissOneCard(moreBtn)) count++;
-      else break;
+    } finally {
+      isRunning = false;
+      // If the toolbar re-rendered mid-run, attach a fresh button.
+      attachButton();
+      const parts = [];
+      if (count) parts.push('✓ Dismissed ' + count);
+      if (skipped) parts.push(skipped + ' skipped');
+      if (cancelled) parts.push('cancelled');
+      updateButton(parts.length ? parts.join(', ') : 'Dismiss All', { running: false });
+      setTimeout(() => {
+        if (!isRunning) updateButton('Dismiss All', { running: false });
+      }, 4000);
     }
-
-    const parts = [];
-    if (count) parts.push('✓ Dismissed ' + count);
-    if (skipped) parts.push(skipped + ' skipped');
-    if (cancelled) parts.push('cancelled');
-    btn.textContent = parts.length ? parts.join(', ') : 'Dismiss All';
-    btn.disabled = false;
-    btn.dataset.running = 'false';
-    setTimeout(() => { if (btn) btn.textContent = 'Dismiss All'; }, 4000);
-    dismissObserver?.observe(document.documentElement, { childList: true, subtree: true });
   }
 
   function attachButton() {
@@ -221,8 +237,9 @@
     wrapper.className = 'toolbar-item';
     const btn = document.createElement('button');
     btn.id = 'tamper-dismiss-all-btn';
-    btn.textContent = 'Dismiss All';
-    btn.dataset.running = 'false';
+    btn.textContent = isRunning ? 'Dismissing...' : 'Dismiss All';
+    btn.disabled = isRunning;
+    btn.dataset.running = isRunning ? 'true' : 'false';
     btn.style.cssText = 'padding:4px 10px;background:#fff;border:1px solid #0078d4;color:#0078d4;border-radius:4px;cursor:pointer;font-size:13px;font-weight:600;';
     btn.addEventListener('mouseenter', () => { btn.style.background = '#e6f2fb'; });
     btn.addEventListener('mouseleave', () => { btn.style.background = '#fff'; });
