@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Patch Targeting Helper – Bulk Add + Bulk Remove (Targets) + Bulk Move (BudgetDetails ListBoxes)
 // @namespace    http://tampermonkey.net/
-// @version      3.1.1
+// @version      3.1.2
 // @description  Bulk Add + Bulk Remove for Edit Advertising Targets (County/City/Zip) + Bulk Move for Kendo ListBoxes on BudgetDetails screens (County, Zip, State, City, DMA).
 // @match        https://thepatch.melonlocal.com/*
 // @run-at       document-end
@@ -18,7 +18,7 @@
   // ============================================================
 
   // Keep in sync with @version in the userscript header above.
-  const VERSION = "patch-targeting-helper-bulk-v3.1.1";
+  const VERSION = "patch-targeting-helper-bulk-v3.1.2";
   const DEBUG = false; // Set to true to enable detailed console logging
 
   // Shared mutable state so window.PatchTargetingHelperDebug works before init().
@@ -610,75 +610,191 @@
   // BULK REMOVE OPERATIONS
   // ============================================================
 
-  const BulkRemoveOperations = {
-    /**
-     * Best-effort detection of the target type for a given table row by
-     * inspecting the delete link's onclick attribute. Handles both
-     * `DeleteAdvertisingTargetCounty(id)` and
-     * `DeleteAdvertisingTarget(id, 'County')` style handlers.
-     * @param {HTMLElement} row - Table row
-     * @returns {"county"|"city"|"zip"|null}
-     */
-    getRowTargetType(row) {
-      const link = row?.querySelector('a[onclick*="DeleteAdvertisingTarget"]');
-      if (!link) return null;
-      const onclick = link.getAttribute("onclick") || "";
+  // ============================================================
+  // API CLIENT — direct calls to the page's backend endpoints
+  // ============================================================
+  // The chip UI doesn't expose DOM-level delete handlers, so Remove ALL
+  // calls POST /Agents/RemoveTarget directly. Endpoint contract was captured
+  // from a real chip-close network request:
+  //   POST /Agents/RemoveTarget
+  //   Content-Type: application/json; charset=UTF-8
+  //   RequestVerificationToken: <from hidden input>
+  //   Body: {"AgencyId":"7374","TargetName":"89052","TargetType":"Zip","TargetId":0}
 
-      const suffix = onclick.match(/DeleteAdvertisingTarget([A-Z][a-zA-Z]+)/);
-      if (suffix) {
-        const t = suffix[1].toLowerCase();
-        if (t === "county" || t === "city" || t === "zip") return t;
+  const ApiClient = {
+    /**
+     * Read the ASP.NET anti-forgery token from the page.
+     * @returns {string}
+     */
+    getAntiforgeryToken() {
+      const input = document.querySelector('input[name="__RequestVerificationToken"]');
+      return input?.value || "";
+    },
+
+    /**
+     * Try to locate the AgencyId from the page. The chip UI is inside an
+     * AJAX-loaded modal, so we probe multiple likely sources.
+     * @returns {string|null}
+     */
+    getAgencyId() {
+      // 1. Hidden input (most common in ASP.NET MVC forms)
+      const hidden = document.querySelector(
+        'input[name="AgencyId"], input[name="agencyId"], input[name="agency-id"]'
+      );
+      if (hidden?.value) return String(hidden.value);
+
+      // 2. Global variables set on the page
+      if (typeof window.AgencyId !== "undefined" && window.AgencyId) {
+        return String(window.AgencyId);
+      }
+      if (typeof window.agencyId !== "undefined" && window.agencyId) {
+        return String(window.agencyId);
       }
 
-      const strArg = onclick.match(/['"](county|city|zip)['"]/i);
-      if (strArg) return strArg[1].toLowerCase();
+      // 3. data-agency-id attribute on any element
+      const dataEl = document.querySelector("[data-agency-id]");
+      if (dataEl?.dataset?.agencyId) return String(dataEl.dataset.agencyId);
+
+      // 4. Scan existing onclick attributes on the page for a call that
+      //    includes the agency id as a literal argument
+      const anyOnclick = document.querySelector(
+        '[onclick*="AgencyId"], [onclick*="agencyId"]'
+      );
+      if (anyOnclick) {
+        const m = anyOnclick
+          .getAttribute("onclick")
+          .match(/(?:AgencyId|agencyId)\s*[:=]\s*['"]?(\d+)['"]?/);
+        if (m) return m[1];
+      }
 
       return null;
     },
 
     /**
-     * Collect all rows in the targets table filtered by type (best effort).
-     * If no row in the table has a detectable type, fall back to returning
-     * every row so callers can still operate (with a caveat warning).
-     * @param {string} typeKey - Target type
-     * @returns {{rows: HTMLElement[], typeDetectionWorks: boolean}}
+     * POST /Agents/RemoveTarget with the given target. Throws on HTTP failure.
+     * @param {{agencyId:string, name:string, type:string, token:string}} args
+     * @returns {Promise<void>}
      */
-    getRowsForType(typeKey) {
-      const all = Array.from(document.querySelectorAll("#exampleTable tbody tr"));
-      let anyTyped = false;
-      const matched = [];
-      for (const row of all) {
-        const t = this.getRowTargetType(row);
-        if (t) anyTyped = true;
-        if (t === typeKey) matched.push(row);
+    async removeTarget({ agencyId, name, type, token }) {
+      const pretty = type.charAt(0).toUpperCase() + type.slice(1).toLowerCase();
+      const response = await fetch("/Agents/RemoveTarget", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          "Content-Type": "application/json; charset=UTF-8",
+          "X-Requested-With": "XMLHttpRequest",
+          RequestVerificationToken: token,
+        },
+        body: JSON.stringify({
+          AgencyId: String(agencyId),
+          TargetName: String(name),
+          TargetType: pretty,
+          TargetId: 0,
+        }),
+      });
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status} ${response.statusText}`);
       }
-      if (anyTyped) {
-        return { rows: matched, typeDetectionWorks: true };
-      }
-      // Fallback: couldn't distinguish types — return everything so the
-      // caller can decide whether to proceed (used for dedup only).
-      return { rows: all, typeDetectionWorks: false };
     },
+  };
 
+  // ============================================================
+  // BULK REMOVE OPERATIONS
+  // ============================================================
+
+  const BulkRemoveOperations = {
     /**
-     * Build a Set of normalized existing target names for a given type,
-     * suitable for duplicate-skipping in BulkAddOperations.
+     * Collect existing target names for dedup. Best-effort — uses the legacy
+     * table selector if present; otherwise returns an empty set so Bulk Add
+     * simply doesn't dedup (rather than silently skipping valid inputs).
      * @param {string} typeKey - Target type
      * @returns {{existing: Set<string>, typeDetectionWorks: boolean}}
      */
     getExistingTargetNames(typeKey) {
-      const { rows, typeDetectionWorks } = this.getRowsForType(typeKey);
       const existing = new Set();
+      const rows = Array.from(
+        document.querySelectorAll("#exampleTable tbody tr")
+      );
       for (const row of rows) {
         const cols = row.querySelectorAll("td");
         if (cols.length < 2) continue;
         existing.add(normalizeText(cols[1].textContent).toLowerCase());
       }
-      return { existing, typeDetectionWorks };
+      return { existing, typeDetectionWorks: false };
     },
 
     /**
-     * Run bulk remove operation
+     * Walk up from the type's Add input to find the section container, then
+     * scan for chip-like elements. Used by Remove ALL for chip-based UIs.
+     * @param {string} typeKey - Target type
+     * @returns {string[]} - Unique chip target names (normalized)
+     */
+    collectChipTargetNames(typeKey) {
+      const cap = typeKey.charAt(0).toUpperCase() + typeKey.slice(1);
+      const addBtn = document.querySelector(
+        `button[onclick="NewTarget${cap}()"]`
+      );
+      const input = document.getElementById(`newTarget${cap}`);
+      const anchor = addBtn || input;
+      if (!anchor) return [];
+
+      const seen = new Set();
+      const names = [];
+      const add = (raw) => {
+        const n = normalizeText(raw);
+        if (!n) return;
+        if (typeKey === "zip" && !/^\d{5}$/.test(n)) return;
+        const k = n.toLowerCase();
+        if (seen.has(k)) return;
+        seen.add(k);
+        names.push(n);
+      };
+
+      // Walk up the anchor's ancestors looking for a container that also
+      // holds chip-like elements (classes containing chip/pill/tag/badge/token).
+      let container = anchor.parentElement;
+      for (let depth = 0; depth < 6 && container; depth++, container = container.parentElement) {
+        const chips = container.querySelectorAll(
+          "[class*='chip'], [class*='pill'], [class*='tag'], [class*='badge'], [class*='token']"
+        );
+        if (!chips.length) continue;
+
+        for (const chip of chips) {
+          if (chip.contains(anchor)) continue; // skip the input row itself
+          // Strip any close-button text from the chip's textContent
+          const closes = chip.querySelectorAll(
+            "[class*='close'], [class*='remove'], [class*='delete'], button, svg"
+          );
+          let text = chip.textContent || "";
+          closes.forEach((c) => {
+            if (c.textContent) text = text.split(c.textContent).join(" ");
+          });
+          add(text);
+        }
+        if (names.length) return names;
+      }
+
+      // Last-resort: for zips, scan the whole document for 5-digit leaves.
+      if (typeKey === "zip") {
+        const walker = document.createTreeWalker(
+          document.body,
+          NodeFilter.SHOW_ELEMENT
+        );
+        while (walker.nextNode()) {
+          const el = walker.currentNode;
+          if (el.children.length !== 0) continue;
+          const t = (el.textContent || "").trim();
+          if (/^\d{5}$/.test(t)) add(t);
+        }
+      }
+
+      return names;
+    },
+
+    /**
+     * Run bulk remove — paste-based. Restored to the original v3.0.0 logic
+     * (no type filtering) because my earlier type-scoping change filtered
+     * out rows when the delete-link onclick didn't match my regex.
      * @param {string} typeKey - Type of target
      * @param {string} rawText - Raw text input
      * @param {number} delayMs - Delay between operations
@@ -694,30 +810,21 @@
 
       log(`Bulk remove started for ${typeKey}`, {
         rawTextLength: rawText?.length,
-        rawTextSample: rawText?.substring(0, 100)
+        rawTextSample: rawText?.substring(0, 100),
       });
 
       const values = typeKey === "zip" ? parseZips(rawText) : parseLinesOrCsv(rawText);
 
-      log(`Parsed values for removal:`, {
-        count: values.length,
-        sample: values.slice(0, 5)
-      });
-
       if (!values.length) {
         alert(`No valid ${pretty} found in the input.`);
-        logError(`No valid items parsed for removal: ${typeKey}`, {
-          rawTextLength: rawText?.length
-        });
         return;
       }
 
       const normalizedValues = values.map((v) => normalizeText(v).toLowerCase());
 
-      // Scope removal to rows that match the requested type so a pasted
-      // name like "Orange" can't accidentally delete a city when the user
-      // meant the county.
-      const { rows, typeDetectionWorks } = this.getRowsForType(typeKey);
+      const rows = Array.from(
+        document.querySelectorAll("#exampleTable tbody tr")
+      );
       let removed = 0;
 
       for (const row of rows) {
@@ -727,7 +834,9 @@
 
           const cellText = normalizeText(cols[1].textContent).toLowerCase();
           if (normalizedValues.includes(cellText)) {
-            const deleteLink = row.querySelector('a[onclick*="DeleteAdvertisingTarget"]');
+            const deleteLink = row.querySelector(
+              'a[onclick*="DeleteAdvertisingTarget"]'
+            );
             if (deleteLink) {
               deleteLink.click();
               await sleep(delayMs);
@@ -739,21 +848,63 @@
         }
       }
 
-      const caveat = !typeDetectionWorks
-        ? `\n\nNote: row type could not be detected, so the match wasn't scoped to ${pretty} only.`
-        : "";
-      const msg = `Bulk Remove Complete.\nRemoved: ${removed} ${pretty}${caveat}`;
-      alert(msg);
-      log(msg);
+      // If DOM-based removal found nothing, fall back to the AJAX endpoint
+      // (used by the newer chip UI, which has no delete links in the DOM).
+      if (removed === 0) {
+        const apiResult = await this._removeViaApi(typeKey, values, delayMs);
+        if (apiResult) {
+          alert(
+            `Bulk Remove Complete (via API).\nRemoved: ${apiResult.removed} of ${values.length} ${pretty}` +
+              (apiResult.failed.length
+                ? `\nFailed: ${apiResult.failed.join(", ")}`
+                : "")
+          );
+          if (apiResult.removed > 0) {
+            setTimeout(() => location.reload(), 400);
+          }
+          return;
+        }
+      }
+
+      alert(`Bulk Remove Complete.\nRemoved: ${removed} ${pretty}`);
     },
 
     /**
-     * Remove every targeting row for the given type. When row-type detection
-     * works, only rows for this type are removed. When it doesn't (because
-     * the onclick attribute has no type marker), fall back to removing every
-     * row in the table — the user's intent is unambiguous since they invoked
-     * this from the type-specific Bulk Remove modal, and the confirm prompt
-     * makes the broader scope explicit.
+     * Shared AJAX-based removal used by both run() (as a fallback) and
+     * removeAll(). Returns null if the API is unavailable (no token/agency).
+     * @param {string} typeKey
+     * @param {string[]} names
+     * @param {number} delayMs
+     * @returns {Promise<{removed:number, failed:string[]}|null>}
+     */
+    async _removeViaApi(typeKey, names, delayMs) {
+      const token = ApiClient.getAntiforgeryToken();
+      const agencyId = ApiClient.getAgencyId();
+      if (!token || !agencyId) {
+        logError("API remove unavailable", {
+          hasToken: !!token,
+          hasAgencyId: !!agencyId,
+        });
+        return null;
+      }
+      let removed = 0;
+      const failed = [];
+      for (const name of names) {
+        try {
+          await ApiClient.removeTarget({ agencyId, name, type: typeKey, token });
+          removed++;
+          await sleep(delayMs);
+        } catch (error) {
+          logError(`API remove failed for ${name}:`, error);
+          failed.push(name);
+        }
+      }
+      return { removed, failed };
+    },
+
+    /**
+     * Remove every target of the given type. Tries DOM-based delete first
+     * (legacy table UI), then falls back to the AJAX endpoint (chip UI).
      * @param {string} typeKey - Target type
      * @param {number} delayMs - Delay between operations
      * @returns {Promise<void>}
@@ -763,42 +914,78 @@
       if (!targetType) {
         throw new Error(`Unknown target type: ${typeKey}`);
       }
-
       const { pretty } = targetType;
-      const { rows, typeDetectionWorks } = this.getRowsForType(typeKey);
 
-      if (!rows.length) {
-        alert(`No ${pretty} to remove.`);
-        return;
-      }
+      // Path A: legacy DOM table
+      const domRows = Array.from(
+        document.querySelectorAll("#exampleTable tbody tr")
+      ).filter((r) => r.querySelector('a[onclick*="DeleteAdvertisingTarget"]'));
 
-      const confirmMsg = typeDetectionWorks
-        ? `Remove ALL ${rows.length} ${pretty}? This cannot be undone.`
-        : `Remove ALL ${rows.length} row(s) in the targets table?\n\n` +
-          `(Row type couldn't be detected from the page, so this will remove ` +
-          `every row currently shown — not just ${pretty}.)\n\nThis cannot be undone.`;
-
-      if (!confirm(confirmMsg)) {
-        return;
-      }
-
-      let removed = 0;
-      for (const row of rows) {
-        try {
-          const deleteLink = row.querySelector('a[onclick*="DeleteAdvertisingTarget"]');
-          if (!deleteLink) continue;
-          deleteLink.click();
-          await sleep(delayMs);
-          removed++;
-        } catch (error) {
-          logError("Error removing row during removeAll:", error);
+      if (domRows.length) {
+        if (!confirm(`Remove ALL ${domRows.length} row(s) in the targets table? This cannot be undone.`)) return;
+        let removed = 0;
+        for (const row of domRows) {
+          try {
+            const link = row.querySelector('a[onclick*="DeleteAdvertisingTarget"]');
+            link.click();
+            await sleep(delayMs);
+            removed++;
+          } catch (error) {
+            logError("Error in removeAll (DOM path):", error);
+          }
         }
+        alert(`Remove All Complete.\nRemoved: ${removed} of ${domRows.length} row(s)`);
+        return;
       }
 
-      const scopeNote = typeDetectionWorks ? pretty : "rows";
-      const msg = `Remove All Complete.\nRemoved: ${removed} of ${rows.length} ${scopeNote}`;
-      alert(msg);
-      log(msg);
+      // Path B: chip UI via AJAX
+      const names = this.collectChipTargetNames(typeKey);
+      if (!names.length) {
+        alert(
+          `No ${pretty} found to remove. Make sure the Edit Advertising Targets modal is open with at least one ${pretty.toLowerCase().replace(/s$/, "")} chip visible.`
+        );
+        return;
+      }
+
+      const token = ApiClient.getAntiforgeryToken();
+      const agencyId = ApiClient.getAgencyId();
+      if (!token || !agencyId) {
+        alert(
+          `Cannot remove via API: missing ${!token ? "anti-forgery token" : "agency ID"}.\n\n` +
+            `This page may have changed. Please report this so the script can be updated.`
+        );
+        logError("Remove All aborted: missing auth", {
+          hasToken: !!token,
+          hasAgencyId: !!agencyId,
+        });
+        return;
+      }
+
+      if (
+        !confirm(
+          `Remove ALL ${names.length} ${pretty} via API?\n\n` +
+            `(The page will reload after removal to refresh the chip list.)\n\n` +
+            `This cannot be undone.`
+        )
+      ) {
+        return;
+      }
+
+      const apiResult = await this._removeViaApi(typeKey, names, delayMs);
+      if (!apiResult) {
+        alert("Remove All failed: API unavailable.");
+        return;
+      }
+
+      const failNote = apiResult.failed.length
+        ? `\nFailed: ${apiResult.failed.slice(0, 5).join(", ")}${apiResult.failed.length > 5 ? "…" : ""}`
+        : "";
+      alert(
+        `Remove All Complete.\nRemoved: ${apiResult.removed} of ${names.length} ${pretty}${failNote}\n\nReloading page…`
+      );
+      if (apiResult.removed > 0) {
+        setTimeout(() => location.reload(), 400);
+      }
     },
   };
 
@@ -1736,6 +1923,7 @@
         BulkMoveOperations,
         ButtonInjector,
         PageDetector,
+        ApiClient,
       });
 
       window.PatchTargetingHelper = {
