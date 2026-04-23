@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Patch Targeting Helper – Bulk Add + Bulk Remove (Targets) + Bulk Move (BudgetDetails ListBoxes)
 // @namespace    http://tampermonkey.net/
-// @version      3.0.0
+// @version      3.1.0
 // @description  Bulk Add + Bulk Remove for Edit Advertising Targets (County/City/Zip) + Bulk Move for Kendo ListBoxes on BudgetDetails screens (County, Zip, State, City, DMA).
 // @match        https://thepatch.melonlocal.com/*
 // @run-at       document-end
@@ -18,7 +18,7 @@
   // ============================================================
 
   // Keep in sync with @version in the userscript header above.
-  const VERSION = "patch-targeting-helper-bulk-v3.0.0";
+  const VERSION = "patch-targeting-helper-bulk-v3.1.0";
   const DEBUG = false; // Set to true to enable detailed console logging
 
   // Shared mutable state so window.PatchTargetingHelperDebug works before init().
@@ -528,10 +528,43 @@
         return;
       }
 
+      // Skip values that are already present as targets of this type.
+      const { existing, typeDetectionWorks } =
+        BulkRemoveOperations.getExistingTargetNames(typeKey);
+
+      const toAdd = [];
+      const skipped = [];
+      for (const val of values) {
+        const key = normalizeText(val).toLowerCase();
+        if (existing.has(key)) {
+          skipped.push(val);
+        } else {
+          toAdd.push(val);
+          // Track within this batch so duplicates pasted twice only add once.
+          existing.add(key);
+        }
+      }
+
+      log(`Dedup summary`, {
+        typeKey,
+        existingCount: existing.size,
+        inputCount: values.length,
+        toAddCount: toAdd.length,
+        skippedCount: skipped.length,
+        typeDetectionWorks,
+      });
+
+      if (!toAdd.length) {
+        alert(
+          `All ${values.length} ${pretty} are already targeted. Nothing to add.`
+        );
+        return;
+      }
+
       let completed = 0;
 
-      for (let i = 0; i < values.length; i++) {
-        const val = values[i];
+      for (let i = 0; i < toAdd.length; i++) {
+        const val = toAdd[i];
         try {
           input.focus();
           setNativeValue(input, val);
@@ -544,7 +577,16 @@
         }
       }
 
-      const msg = `Bulk Add Complete.\nProcessed: ${completed} of ${values.length} ${pretty}`;
+      const skipNote = skipped.length
+        ? `\nSkipped (already targeted): ${skipped.length}`
+        : "";
+      const detectNote = !typeDetectionWorks && skipped.length
+        ? `\n\nNote: row type could not be detected, so dedup matched against ALL rows in the table regardless of type.`
+        : "";
+      const msg =
+        `Bulk Add Complete.\nProcessed: ${completed} of ${toAdd.length} ${pretty}` +
+        skipNote +
+        detectNote;
       alert(msg);
       log(msg);
     },
@@ -569,6 +611,72 @@
   // ============================================================
 
   const BulkRemoveOperations = {
+    /**
+     * Best-effort detection of the target type for a given table row by
+     * inspecting the delete link's onclick attribute. Handles both
+     * `DeleteAdvertisingTargetCounty(id)` and
+     * `DeleteAdvertisingTarget(id, 'County')` style handlers.
+     * @param {HTMLElement} row - Table row
+     * @returns {"county"|"city"|"zip"|null}
+     */
+    getRowTargetType(row) {
+      const link = row?.querySelector('a[onclick*="DeleteAdvertisingTarget"]');
+      if (!link) return null;
+      const onclick = link.getAttribute("onclick") || "";
+
+      const suffix = onclick.match(/DeleteAdvertisingTarget([A-Z][a-zA-Z]+)/);
+      if (suffix) {
+        const t = suffix[1].toLowerCase();
+        if (t === "county" || t === "city" || t === "zip") return t;
+      }
+
+      const strArg = onclick.match(/['"](county|city|zip)['"]/i);
+      if (strArg) return strArg[1].toLowerCase();
+
+      return null;
+    },
+
+    /**
+     * Collect all rows in the targets table filtered by type (best effort).
+     * If no row in the table has a detectable type, fall back to returning
+     * every row so callers can still operate (with a caveat warning).
+     * @param {string} typeKey - Target type
+     * @returns {{rows: HTMLElement[], typeDetectionWorks: boolean}}
+     */
+    getRowsForType(typeKey) {
+      const all = Array.from(document.querySelectorAll("#exampleTable tbody tr"));
+      let anyTyped = false;
+      const matched = [];
+      for (const row of all) {
+        const t = this.getRowTargetType(row);
+        if (t) anyTyped = true;
+        if (t === typeKey) matched.push(row);
+      }
+      if (anyTyped) {
+        return { rows: matched, typeDetectionWorks: true };
+      }
+      // Fallback: couldn't distinguish types — return everything so the
+      // caller can decide whether to proceed (used for dedup only).
+      return { rows: all, typeDetectionWorks: false };
+    },
+
+    /**
+     * Build a Set of normalized existing target names for a given type,
+     * suitable for duplicate-skipping in BulkAddOperations.
+     * @param {string} typeKey - Target type
+     * @returns {{existing: Set<string>, typeDetectionWorks: boolean}}
+     */
+    getExistingTargetNames(typeKey) {
+      const { rows, typeDetectionWorks } = this.getRowsForType(typeKey);
+      const existing = new Set();
+      for (const row of rows) {
+        const cols = row.querySelectorAll("td");
+        if (cols.length < 2) continue;
+        existing.add(normalizeText(cols[1].textContent).toLowerCase());
+      }
+      return { existing, typeDetectionWorks };
+    },
+
     /**
      * Run bulk remove operation
      * @param {string} typeKey - Type of target
@@ -606,7 +714,10 @@
 
       const normalizedValues = values.map((v) => normalizeText(v).toLowerCase());
 
-      const rows = Array.from(document.querySelectorAll("#exampleTable tbody tr"));
+      // Scope removal to rows that match the requested type so a pasted
+      // name like "Orange" can't accidentally delete a city when the user
+      // meant the county.
+      const { rows, typeDetectionWorks } = this.getRowsForType(typeKey);
       let removed = 0;
 
       for (const row of rows) {
@@ -628,7 +739,61 @@
         }
       }
 
-      const msg = `Bulk Remove Complete.\nRemoved: ${removed} ${pretty}`;
+      const caveat = !typeDetectionWorks
+        ? `\n\nNote: row type could not be detected, so the match wasn't scoped to ${pretty} only.`
+        : "";
+      const msg = `Bulk Remove Complete.\nRemoved: ${removed} ${pretty}${caveat}`;
+      alert(msg);
+      log(msg);
+    },
+
+    /**
+     * Remove every targeting row for the given type.
+     * @param {string} typeKey - Target type
+     * @param {number} delayMs - Delay between operations
+     * @returns {Promise<void>}
+     */
+    async removeAll(typeKey, delayMs = TIMING.DEFAULT_DELAY_MS) {
+      const targetType = BulkAddOperations.getTargetTypeConfig(typeKey);
+      if (!targetType) {
+        throw new Error(`Unknown target type: ${typeKey}`);
+      }
+
+      const { pretty } = targetType;
+      const { rows, typeDetectionWorks } = this.getRowsForType(typeKey);
+
+      if (!typeDetectionWorks) {
+        alert(
+          `Cannot safely remove all ${pretty}: the target type could not be ` +
+          `detected from the table. Use "Bulk Remove" with a pasted list instead.`
+        );
+        logError("removeAll aborted: no row type detection", { typeKey });
+        return;
+      }
+
+      if (!rows.length) {
+        alert(`No ${pretty} to remove.`);
+        return;
+      }
+
+      if (!confirm(`Remove ALL ${rows.length} ${pretty}? This cannot be undone.`)) {
+        return;
+      }
+
+      let removed = 0;
+      for (const row of rows) {
+        try {
+          const deleteLink = row.querySelector('a[onclick*="DeleteAdvertisingTarget"]');
+          if (!deleteLink) continue;
+          deleteLink.click();
+          await sleep(delayMs);
+          removed++;
+        } catch (error) {
+          logError("Error removing row during removeAll:", error);
+        }
+      }
+
+      const msg = `Remove All Complete.\nRemoved: ${removed} of ${rows.length} ${pretty}`;
       alert(msg);
       log(msg);
     },
@@ -1167,9 +1332,23 @@
       },
       "danger"
     );
+    const removeAllBtn = ModalBuilder.createActionButton(
+      `Remove ALL ${pretty}`,
+      async () => {
+        close();
+        try {
+          await BulkRemoveOperations.removeAll(typeKey);
+        } catch (error) {
+          logError("Remove all error:", error);
+          alert(`Error during remove all: ${error.message}`);
+        }
+      },
+      "danger"
+    );
 
     footer.appendChild(cancelBtn);
     footer.appendChild(runBtn);
+    footer.appendChild(removeAllBtn);
 
     document.body.appendChild(modal);
     FocusManager.suspendDashboardFocusManagement(modal);
