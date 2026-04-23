@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Patch Targeting Helper – Bulk Add + Bulk Remove (Targets) + Bulk Move (BudgetDetails ListBoxes)
 // @namespace    http://tampermonkey.net/
-// @version      3.1.2
+// @version      3.1.3
 // @description  Bulk Add + Bulk Remove for Edit Advertising Targets (County/City/Zip) + Bulk Move for Kendo ListBoxes on BudgetDetails screens (County, Zip, State, City, DMA).
 // @match        https://thepatch.melonlocal.com/*
 // @run-at       document-end
@@ -18,7 +18,7 @@
   // ============================================================
 
   // Keep in sync with @version in the userscript header above.
-  const VERSION = "patch-targeting-helper-bulk-v3.1.2";
+  const VERSION = "patch-targeting-helper-bulk-v3.1.3";
   const DEBUG = false; // Set to true to enable detailed console logging
 
   // Shared mutable state so window.PatchTargetingHelperDebug works before init().
@@ -704,14 +704,16 @@
 
   const BulkRemoveOperations = {
     /**
-     * Collect existing target names for dedup. Best-effort — uses the legacy
-     * table selector if present; otherwise returns an empty set so Bulk Add
-     * simply doesn't dedup (rather than silently skipping valid inputs).
+     * Collect existing target names for dedup. Tries the legacy
+     * #exampleTable first, then falls back to scanning chips in the modern
+     * chip UI. Returns lowercased names so callers can dedup directly.
      * @param {string} typeKey - Target type
      * @returns {{existing: Set<string>, typeDetectionWorks: boolean}}
      */
     getExistingTargetNames(typeKey) {
       const existing = new Set();
+
+      // Path A: legacy table
       const rows = Array.from(
         document.querySelectorAll("#exampleTable tbody tr")
       );
@@ -720,12 +722,29 @@
         if (cols.length < 2) continue;
         existing.add(normalizeText(cols[1].textContent).toLowerCase());
       }
+
+      // Path B: chip UI fallback — only if the table yielded nothing
+      if (existing.size === 0) {
+        for (const name of this.collectChipTargetNames(typeKey)) {
+          existing.add(name.toLowerCase());
+        }
+      }
+
       return { existing, typeDetectionWorks: false };
     },
 
     /**
      * Walk up from the type's Add input to find the section container, then
-     * scan for chip-like elements. Used by Remove ALL for chip-based UIs.
+     * scan for chip-like elements. Used by both dedup (BulkAdd) and
+     * Remove ALL for chip-based UIs.
+     *
+     * The detector tries three strategies, most specific first:
+     *   1. Elements with class matching chip/pill/tag/badge/token.
+     *   2. Elements that visibly contain a close-icon (×, ⊗, button, svg,
+     *      class="close|remove|delete") — catches chip structures whose
+     *      class we can't predict.
+     *   3. For zip specifically, a last-resort document-wide scan for leaf
+     *      elements whose textContent is a 5-digit number.
      * @param {string} typeKey - Target type
      * @returns {string[]} - Unique chip target names (normalized)
      */
@@ -738,11 +757,25 @@
       const anchor = addBtn || input;
       if (!anchor) return [];
 
+      // Regex for common close-icon characters. Using a character class
+      // since some environments render these as surrogate pairs.
+      const CLOSE_ICONS = /[\u00D7\u2715\u2716\u2717\u2718\u2A2F\u229D\u229C×⊗✕✖✗✘]/g;
+
       const seen = new Set();
       const names = [];
+
+      const cleanText = (raw) =>
+        normalizeText(
+          String(raw || "")
+            .replace(CLOSE_ICONS, "")
+            .replace(/\u00A0/g, " ")
+        );
+
       const add = (raw) => {
-        const n = normalizeText(raw);
-        if (!n) return;
+        const n = cleanText(raw);
+        if (!n || n.length > 100) return;
+        // Filter out UI chrome labels that could slip through
+        if (/^(target counties|target cities|target zips|target states|licensed states|add|bulk add|bulk remove|cancel|remove all)$/i.test(n)) return;
         if (typeKey === "zip" && !/^\d{5}$/.test(n)) return;
         const k = n.toLowerCase();
         if (seen.has(k)) return;
@@ -750,31 +783,47 @@
         names.push(n);
       };
 
-      // Walk up the anchor's ancestors looking for a container that also
-      // holds chip-like elements (classes containing chip/pill/tag/badge/token).
+      // Walk up the anchor's ancestors looking for a container that
+      // contains chip-like elements.
       let container = anchor.parentElement;
-      for (let depth = 0; depth < 6 && container; depth++, container = container.parentElement) {
-        const chips = container.querySelectorAll(
+      for (let depth = 0; depth < 8 && container; depth++, container = container.parentElement) {
+        // Strategy 1: explicit chip classes
+        const classChips = container.querySelectorAll(
           "[class*='chip'], [class*='pill'], [class*='tag'], [class*='badge'], [class*='token']"
         );
-        if (!chips.length) continue;
-
-        for (const chip of chips) {
-          if (chip.contains(anchor)) continue; // skip the input row itself
-          // Strip any close-button text from the chip's textContent
-          const closes = chip.querySelectorAll(
-            "[class*='close'], [class*='remove'], [class*='delete'], button, svg"
-          );
-          let text = chip.textContent || "";
-          closes.forEach((c) => {
-            if (c.textContent) text = text.split(c.textContent).join(" ");
-          });
-          add(text);
+        for (const c of classChips) {
+          if (c.contains(anchor)) continue;
+          add(c.textContent);
         }
         if (names.length) return names;
+
+        // Strategy 2: any element (span/div/li/button/a) that contains a
+        // close-icon or close-button and has short text content. Requires
+        // >=2 matches so we don't mis-identify a lone "×" somewhere.
+        const candidates = container.querySelectorAll("span, div, li, button, a");
+        const matches = [];
+        for (const c of candidates) {
+          if (c.contains(anchor) || c === container) continue;
+          const closeEl = c.querySelector(
+            "button[aria-label*='remove' i], button[aria-label*='close' i], " +
+              "[class*='close'], [class*='remove'], [class*='delete'], svg"
+          );
+          const hasIcon = CLOSE_ICONS.test(c.textContent || "");
+          CLOSE_ICONS.lastIndex = 0; // reset global regex state
+          if (!closeEl && !hasIcon) continue;
+          const text = cleanText(c.textContent);
+          if (!text) continue;
+          // Avoid nested matches (parent already counted)
+          if (matches.some((m) => m.el.contains(c))) continue;
+          matches.push({ el: c, text });
+        }
+        if (matches.length >= 2) {
+          for (const m of matches) add(m.text);
+          if (names.length) return names;
+        }
       }
 
-      // Last-resort: for zips, scan the whole document for 5-digit leaves.
+      // Strategy 3: last-resort zip scan
       if (typeKey === "zip") {
         const walker = document.createTreeWalker(
           document.body,
