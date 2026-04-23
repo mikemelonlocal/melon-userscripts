@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Patch Targeting Helper – Bulk Add + Bulk Remove (Targets) + Bulk Move (BudgetDetails ListBoxes)
 // @namespace    http://tampermonkey.net/
-// @version      3.1.0
+// @version      3.1.1
 // @description  Bulk Add + Bulk Remove for Edit Advertising Targets (County/City/Zip) + Bulk Move for Kendo ListBoxes on BudgetDetails screens (County, Zip, State, City, DMA).
 // @match        https://thepatch.melonlocal.com/*
 // @run-at       document-end
@@ -18,7 +18,7 @@
   // ============================================================
 
   // Keep in sync with @version in the userscript header above.
-  const VERSION = "patch-targeting-helper-bulk-v3.1.0";
+  const VERSION = "patch-targeting-helper-bulk-v3.1.1";
   const DEBUG = false; // Set to true to enable detailed console logging
 
   // Shared mutable state so window.PatchTargetingHelperDebug works before init().
@@ -748,7 +748,12 @@
     },
 
     /**
-     * Remove every targeting row for the given type.
+     * Remove every targeting row for the given type. When row-type detection
+     * works, only rows for this type are removed. When it doesn't (because
+     * the onclick attribute has no type marker), fall back to removing every
+     * row in the table — the user's intent is unambiguous since they invoked
+     * this from the type-specific Bulk Remove modal, and the confirm prompt
+     * makes the broader scope explicit.
      * @param {string} typeKey - Target type
      * @param {number} delayMs - Delay between operations
      * @returns {Promise<void>}
@@ -762,21 +767,18 @@
       const { pretty } = targetType;
       const { rows, typeDetectionWorks } = this.getRowsForType(typeKey);
 
-      if (!typeDetectionWorks) {
-        alert(
-          `Cannot safely remove all ${pretty}: the target type could not be ` +
-          `detected from the table. Use "Bulk Remove" with a pasted list instead.`
-        );
-        logError("removeAll aborted: no row type detection", { typeKey });
-        return;
-      }
-
       if (!rows.length) {
         alert(`No ${pretty} to remove.`);
         return;
       }
 
-      if (!confirm(`Remove ALL ${rows.length} ${pretty}? This cannot be undone.`)) {
+      const confirmMsg = typeDetectionWorks
+        ? `Remove ALL ${rows.length} ${pretty}? This cannot be undone.`
+        : `Remove ALL ${rows.length} row(s) in the targets table?\n\n` +
+          `(Row type couldn't be detected from the page, so this will remove ` +
+          `every row currently shown — not just ${pretty}.)\n\nThis cannot be undone.`;
+
+      if (!confirm(confirmMsg)) {
         return;
       }
 
@@ -793,7 +795,8 @@
         }
       }
 
-      const msg = `Remove All Complete.\nRemoved: ${removed} of ${rows.length} ${pretty}`;
+      const scopeNote = typeDetectionWorks ? pretty : "rows";
+      const msg = `Remove All Complete.\nRemoved: ${removed} of ${rows.length} ${scopeNote}`;
       alert(msg);
       log(msg);
     },
