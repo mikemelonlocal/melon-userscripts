@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Daily Cap Calculator - Melon Local (Enhanced)
 // @namespace    https://thepatch.melonlocal.com/
-// @version      3.5.0
+// @version      3.5.1
 // @description  Paces budgets evenly through end of month. Auto-fills from page data. Refresh + Freeze. Enhanced with auto-save, export/import, keyboard shortcuts, and improved UX.
 // @author       Melon Local
 // @match        https://thepatch.melonlocal.com/*
@@ -1943,12 +1943,61 @@
 
   function setupNavigationListener() {
     let lastPath = window.location.pathname;
+    let lastHash = window.location.hash;
 
-    function onPathChange() {
+    function onUrlChange() {
       const newPath = window.location.pathname;
-      if (newPath === lastPath) return; // Only a hash change — hashchange listener handles those
-      lastPath = newPath;
+      const newHash = window.location.hash;
 
+      const pathChanged = newPath !== lastPath;
+      const hashChanged = newHash !== lastHash;
+
+      if (!pathChanged && !hashChanged) return; // Truly nothing changed
+      lastPath = newPath;
+      lastHash = newHash;
+
+      // ── Hash-only change via pushState/replaceState ────────────────────────
+      // The native hashchange event only fires for direct location.hash
+      // assignments — NOT for pushState. MelonLocal uses pushState to switch
+      // tabs, so we handle visibility here when only the fragment changed.
+      if (!pathChanged) {
+        Utils.log('SPA hash-only change (pushState):', newHash);
+        const calc = document.getElementById('daily-cap-calculator');
+        if (!calc) return;
+
+        const visible = shouldShowCalculator();
+        calc.style.display = visible ? '' : 'none';
+
+        if (visible && !State.frozen && isDashboardPage()) {
+          Utils.log('Refreshing data after pushState tab switch');
+          State.dom.results.style.display = 'none';
+          State.dom.results.innerHTML = '';
+
+          let hnRefreshed = false;
+          let hnTimer = null;
+          let hnObs = null;
+
+          const doHnRefresh = (reason) => {
+            if (hnRefreshed) return;
+            hnRefreshed = true;
+            if (hnObs) { hnObs.disconnect(); hnObs = null; }
+            if (hnTimer) { clearTimeout(hnTimer); hnTimer = null; }
+            Utils.log('Populating after pushState hash change:', reason);
+            UI.populateFromPage();
+          };
+
+          hnObs = new MutationObserver(() => {
+            if (hnTimer) clearTimeout(hnTimer);
+            hnTimer = setTimeout(() => doHnRefresh('content settled'), 500);
+          });
+          const hnRoot = document.querySelector('.main-content, main, #main, .content') || document.body;
+          hnObs.observe(hnRoot, { childList: true, subtree: true });
+          setTimeout(() => doHnRefresh('fallback'), 1500);
+        }
+        return;
+      }
+
+      // ── Path changed (navigating to a different agent / page) ─────────────
       Utils.log('SPA path change detected:', newPath);
 
       const calc = document.getElementById('daily-cap-calculator');
@@ -1978,7 +2027,7 @@
       State.dom.results.style.display = 'none';
       State.dom.results.innerHTML = '';
 
-      // Single-fire refresh with MutationObserver + fallback, same pattern as hash listener
+      // Single-fire refresh with MutationObserver + fallback
       let navRefreshed = false;
       let navSettleTimer = null;
       let navObs = null;
@@ -2008,18 +2057,18 @@
     const origPush = history.pushState.bind(history);
     history.pushState = function (...args) {
       origPush(...args);
-      setTimeout(onPathChange, 0);
+      setTimeout(onUrlChange, 0);
     };
 
     // Intercept replaceState (some SPAs use this instead of pushState)
     const origReplace = history.replaceState.bind(history);
     history.replaceState = function (...args) {
       origReplace(...args);
-      setTimeout(onPathChange, 0);
+      setTimeout(onUrlChange, 0);
     };
 
     // Handle browser Back/Forward buttons
-    window.addEventListener('popstate', onPathChange);
+    window.addEventListener('popstate', onUrlChange);
   }
 
   // ============================================================================
