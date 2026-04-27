@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Microsoft Ads - Dismiss All Recommendations
 // @namespace    http://tampermonkey.net/
-// @version      1.10
+// @version      1.11
 // @description  Adds a "Dismiss All" button to the Microsoft Advertising recommendations page
 // @author       You
 // @match        https://ui.ads.microsoft.com/*
@@ -269,6 +269,14 @@
 
   dismissObserver = new MutationObserver(scheduleAttach);
   dismissObserver.observe(document.documentElement, { childList: true, subtree: true });
+
+  // Safety net: if the SPA re-renders the toolbar and wipes our button after the
+  // last mutation we saw, this periodic check re-attaches it.
+  setInterval(() => {
+    if (!location.href.toLowerCase().includes('recommendations')) return;
+    if (document.getElementById('tamper-dismiss-all-btn')) return;
+    attachButton();
+  }, 1000);
 
   attachButton();
 })();
