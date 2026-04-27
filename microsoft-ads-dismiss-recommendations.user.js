@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Microsoft Ads - Dismiss All Recommendations
 // @namespace    http://tampermonkey.net/
-// @version      1.9.1
+// @version      1.10
 // @description  Adds a "Dismiss All" button to the Microsoft Advertising recommendations page
 // @author       You
-// @match        https://ui.ads.microsoft.com/*recommendations*
+// @match        https://ui.ads.microsoft.com/*
 // @run-at       document-start
 // @grant        none
 // @updateURL    https://raw.githubusercontent.com/mikemelonlocal/melon-userscripts/main/microsoft-ads-dismiss-recommendations.user.js
@@ -231,7 +231,7 @@
   }
 
   function attachButton() {
-    if (!location.href.includes('recommendations')) return;
+    if (!location.href.toLowerCase().includes('recommendations')) return;
     if (document.getElementById('tamper-dismiss-all-btn')) return;
     const container = document.querySelector('.download-button-container');
     if (!container) return;
