@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Microsoft Ads - Dismiss All Recommendations
 // @namespace    http://tampermonkey.net/
-// @version      1.11
+// @version      1.12
 // @description  Adds a "Dismiss All" button to the Microsoft Advertising recommendations page
 // @author       You
 // @match        https://ui.ads.microsoft.com/*
@@ -15,6 +15,8 @@
 
 (function () {
   'use strict';
+
+  console.info('[DismissAll] userscript loaded (v1.12)');
 
   let dismissObserver = null;
   let isRunning = false;
@@ -231,23 +233,32 @@
   }
 
   function attachButton() {
-    if (!location.href.toLowerCase().includes('recommendations')) return;
-    if (document.getElementById('tamper-dismiss-all-btn')) return;
-    const container = document.querySelector('.download-button-container');
-    if (!container) return;
-    const wrapper = document.createElement('div');
-    wrapper.className = 'toolbar-item';
+    const onRec = location.href.toLowerCase().includes('recommendations');
+    const existing = document.getElementById('tamper-dismiss-all-btn');
+    if (!onRec) {
+      // User navigated away — remove the floating button.
+      existing?.remove();
+      return;
+    }
+    if (existing) return;
+    if (!document.body) return; // document-start: body may not exist yet
+
     const btn = document.createElement('button');
     btn.id = 'tamper-dismiss-all-btn';
     btn.textContent = isRunning ? 'Dismissing...' : 'Dismiss All';
     btn.disabled = isRunning;
     btn.dataset.running = isRunning ? 'true' : 'false';
-    btn.style.cssText = 'padding:4px 10px;background:#fff;border:1px solid #0078d4;color:#0078d4;border-radius:4px;cursor:pointer;font-size:13px;font-weight:600;';
-    btn.addEventListener('mouseenter', () => { btn.style.background = '#e6f2fb'; });
-    btn.addEventListener('mouseleave', () => { btn.style.background = '#fff'; });
+    btn.style.cssText =
+      'position:fixed;bottom:24px;right:24px;z-index:2147483646;' +
+      'padding:10px 18px;background:#0078d4;color:#fff;' +
+      'border:none;border-radius:24px;cursor:pointer;' +
+      'font-size:13px;font-weight:600;' +
+      'box-shadow:0 4px 12px rgba(0,0,0,0.25);' +
+      'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;';
+    btn.addEventListener('mouseenter', () => { btn.style.background = '#106ebe'; });
+    btn.addEventListener('mouseleave', () => { btn.style.background = '#0078d4'; });
     btn.addEventListener('mousedown', e => { e.preventDefault(); runDismissAll(); });
-    wrapper.appendChild(btn);
-    container.appendChild(wrapper);
+    document.body.appendChild(btn);
   }
 
   let attachScheduled = false;
