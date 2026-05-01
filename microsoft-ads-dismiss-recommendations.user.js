@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Microsoft Ads - Dismiss All Recommendations
 // @namespace    http://tampermonkey.net/
-// @version      1.14
+// @version      1.15
 // @description  Adds a "Dismiss All" button to the Microsoft Advertising recommendations page
 // @author       You
 // @match        https://ui.ads.microsoft.com/*
@@ -14,7 +14,7 @@
 (function () {
   'use strict';
 
-  console.info('[DismissAll] userscript loaded (v1.14)');
+  console.info('[DismissAll] userscript loaded (v1.15)');
 
   let dismissObserver = null;
   let isRunning = false;
@@ -231,37 +231,29 @@
   }
 
   function attachButton() {
-    const onRec = location.href.toLowerCase().includes('recommendations');
-    const existing = document.getElementById('tamper-dismiss-all-btn');
-    if (!onRec) {
-      // User navigated away — remove the floating button.
-      existing?.remove();
+    if (!location.href.toLowerCase().includes('recommendations')) {
+      // User navigated away — drop any stale button.
+      document.getElementById('tamper-dismiss-all-btn')?.remove();
       return;
     }
-    if (existing) return;
-    if (!document.documentElement) return;
-
+    if (document.getElementById('tamper-dismiss-all-btn')) return;
+    const container = document.querySelector('.download-button-container');
+    if (!container) return;
+    const wrapper = document.createElement('div');
+    wrapper.className = 'toolbar-item';
     const btn = document.createElement('button');
     btn.id = 'tamper-dismiss-all-btn';
     btn.textContent = isRunning ? 'Dismissing...' : 'Dismiss All';
     btn.disabled = isRunning;
     btn.dataset.running = isRunning ? 'true' : 'false';
-    // Use !important so Microsoft's CSS-in-JS can't override us, and append to
-    // <html> rather than <body> so we're not trapped in body's stacking context.
     btn.style.cssText =
-      'position:fixed !important;bottom:24px !important;left:24px !important;' +
-      'z-index:2147483647 !important;' +
-      'padding:10px 18px !important;background:#0078d4 !important;color:#fff !important;' +
-      'border:none !important;border-radius:24px !important;cursor:pointer !important;' +
-      'font-size:13px !important;font-weight:600 !important;' +
-      'box-shadow:0 4px 12px rgba(0,0,0,0.25) !important;' +
-      'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif !important;' +
-      'pointer-events:auto !important;opacity:1 !important;visibility:visible !important;' +
-      'display:inline-block !important;';
-    btn.addEventListener('mouseenter', () => { btn.style.setProperty('background', '#106ebe', 'important'); });
-    btn.addEventListener('mouseleave', () => { btn.style.setProperty('background', '#0078d4', 'important'); });
+      'padding:4px 10px;background:#fff;border:1px solid #0078d4;color:#0078d4;' +
+      'border-radius:4px;cursor:pointer;font-size:13px;font-weight:600;';
+    btn.addEventListener('mouseenter', () => { btn.style.background = '#e6f2fb'; });
+    btn.addEventListener('mouseleave', () => { btn.style.background = '#fff'; });
     btn.addEventListener('mousedown', e => { e.preventDefault(); runDismissAll(); });
-    document.documentElement.appendChild(btn);
+    wrapper.appendChild(btn);
+    container.appendChild(wrapper);
   }
 
   let attachScheduled = false;
