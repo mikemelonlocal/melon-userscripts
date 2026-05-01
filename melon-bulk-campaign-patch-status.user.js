@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Melon Local – Bulk Campaign Patch Status
 // @namespace    https://thepatch.melonlocal.com/
-// @version      2.5.0
+// @version      2.5.1
 // @description  Multiselect toolbar on the Campaigns grid for bulk Active/Inactive patch status changes. Collapsible sticky toolbar, polled status verification, budget-status guard, audit-selection isolation view, Melon brand-colored progress, and multipronged device/product preset filters.
 // @author       You
 // @match        https://thepatch.melonlocal.com/Agents/BudgetDetails*
@@ -646,11 +646,20 @@
     removePanel();
     const toolbar = document.getElementById(TOOLBAR_ID);
     if (!toolbar) return null;
+
+    // Expand the toolbar if collapsed so the panel is never hidden beneath it.
+    if (toolbar.classList.contains('collapsed')) toggleCollapsed();
+
     const panel = document.createElement('div');
     panel.id = PANEL_ID;
     if (klass) panel.className = klass;
     panel.innerHTML = html;
     toolbar.parentElement.insertBefore(panel, toolbar.nextSibling);
+
+    // The toolbar is position:sticky, so its DOM position may be scrolled
+    // above the viewport. Scroll back to the top so the panel is visible.
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+
     return panel;
   }
 
@@ -857,5 +866,5 @@
   observer.observe(document.body, { childList: true, subtree: true });
 
   ensureUI();
-  console.log('[Melon Bulk] v2.5.0 ready.');
+  console.log('[Melon Bulk] v2.5.1 ready.');
 })();
