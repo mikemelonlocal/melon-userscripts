@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Melon Local – Bulk Campaign Patch Status
 // @namespace    https://thepatch.melonlocal.com/
-// @version      3.0.4
+// @version      3.0.5
 // @description  Bulk Active/Inactive campaign patch status tool. Sticky collapsible toolbar, pill look-ahead counts, row processing spinner, undo/rollback buffer, Action FAB, budget-status guard, polled verification.
 // @author       You
 // @match        https://thepatch.melonlocal.com/Agents/BudgetDetails*
@@ -239,9 +239,10 @@
 
       /* ── Panel ───────────────────────────────────────────────────────────── */
       #${PANEL_ID} {
-        background: #fff; border: 2px solid ${BRAND_ACTIVE}; border-radius: 8px;
-        padding: 12px 16px; margin-bottom: 12px; font-size: 13px;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        background: #fff; font-size: 13px;
+        border-top: 2px solid ${BRAND_ACTIVE};
+        padding: 12px 16px;
+        border-radius: 0 0 6px 6px;
       }
       #${PANEL_ID}.active  { border-color: ${BRAND_ACTIVE}; }
       #${PANEL_ID}.active  .panel-title { color: ${BRAND_ACTIVE}; }
@@ -656,16 +657,17 @@
     const toolbar = document.getElementById(TOOLBAR_ID);
     if (!toolbar) return null;
 
+    // Expand the toolbar if collapsed so the panel section is visible.
     if (toolbar.classList.contains('collapsed')) toggleCollapsed();
 
     const panel = document.createElement('div');
     panel.id = PANEL_ID;
     if (klass) panel.className = klass;
     panel.innerHTML = html;
-    toolbar.parentElement.insertBefore(panel, toolbar.nextSibling);
 
-    // Scroll to top so the panel (near the sticky toolbar) is always visible.
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+    // Append inside the sticky toolbar so the panel sticks with it —
+    // no page scroll needed regardless of where the user is on the page.
+    toolbar.appendChild(panel);
     return panel;
   }
 
@@ -915,5 +917,5 @@
   new MutationObserver(debouncedEnsure).observe(document.body, { childList: true, subtree: true });
 
   ensureUI();
-  console.log('[Melon Bulk] v3.0.4 ready.');
+  console.log('[Melon Bulk] v3.0.5 ready.');
 })();
