@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Melon Local – Bulk Campaign Patch Status
 // @namespace    https://thepatch.melonlocal.com/
-// @version      2.2.1
-// @description  Multiselect toolbar on the Campaigns grid for bulk Active/Inactive patch status changes. Sticky toolbar, polled status verification, audit-selection isolation view, and Melon brand-colored progress.
+// @version      2.3.0
+// @description  Multiselect toolbar on the Campaigns grid for bulk Active/Inactive patch status changes. Collapsible sticky toolbar, polled status verification, audit-selection isolation view, and Melon brand-colored progress.
 // @author       You
 // @match        https://thepatch.melonlocal.com/Agents/BudgetDetails*
 // @grant        none
@@ -25,6 +25,9 @@
   const STYLE_ID      = 'melon-bulk-style';
   const AUDIT_BTN_ID  = 'melon-bulk-audit';
   const AUDIT_BODY_CLASS = 'melon-audit-mode';
+  const COLLAPSE_BTN_ID = 'melon-bulk-collapse';
+  const HEADER_COUNT_ID = 'melon-bulk-header-count';
+  const COLLAPSE_STORAGE_KEY = 'melonBulkCollapsed';
 
   // Verification polling: check aria-checked every VERIFY_INTERVAL_MS for up to VERIFY_RETRIES attempts.
   const VERIFY_INTERVAL_MS = 300;
@@ -97,12 +100,8 @@
         background: #fff;
         border: 2px solid ${BRAND_SUCCESS};
         border-radius: 8px;
-        padding: 12px 16px;
+        padding: 0;
         margin-bottom: 12px;
-        display: flex;
-        align-items: center;
-        gap: 10px;
-        flex-wrap: wrap;
         font-family: inherit;
         font-size: 13px;
         box-shadow: 0 2px 8px rgba(0,0,0,0.15);
@@ -111,6 +110,52 @@
         top: 0;
         z-index: 9999;
       }
+      #${TOOLBAR_ID} .melon-bulk-header {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 8px 14px;
+        cursor: pointer;
+        user-select: none;
+      }
+      #${TOOLBAR_ID} .melon-bulk-header .melon-title {
+        font-weight: 700;
+        color: ${BRAND_ACTIVE};
+        letter-spacing: 0.2px;
+      }
+      #${TOOLBAR_ID} .melon-bulk-header .melon-spacer { flex: 1; }
+      #${TOOLBAR_ID} #${HEADER_COUNT_ID} {
+        background: ${BRAND_SUCCESS};
+        color: #fff;
+        font-weight: 600;
+        padding: 2px 8px;
+        border-radius: 10px;
+        font-size: 11px;
+      }
+      #${TOOLBAR_ID} #${HEADER_COUNT_ID}.empty {
+        background: #eee;
+        color: #888;
+      }
+      #${TOOLBAR_ID} #${COLLAPSE_BTN_ID} {
+        background: transparent;
+        border: 1px solid #ccc;
+        border-radius: 4px;
+        padding: 2px 8px;
+        font-size: 11px;
+        cursor: pointer;
+        color: #555;
+      }
+      #${TOOLBAR_ID} #${COLLAPSE_BTN_ID}:hover { background: #f5f5f5; }
+      #${TOOLBAR_ID} .melon-bulk-body {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+        padding: 0 14px 12px 14px;
+        border-top: 1px solid #eee;
+        padding-top: 12px;
+      }
+      #${TOOLBAR_ID}.collapsed .melon-bulk-body { display: none; }
       #${TOOLBAR_ID} label { font-weight: 600; color: #333; }
       #${TOOLBAR_ID} select,
       #${TOOLBAR_ID} input[type="text"] {
@@ -241,27 +286,38 @@
     const toolbar = document.createElement('div');
     toolbar.id = TOOLBAR_ID;
     toolbar.tabIndex = -1;
+    // Default collapsed unless the user has previously expanded it.
+    const startCollapsed = localStorage.getItem(COLLAPSE_STORAGE_KEY) !== 'open';
+    if (startCollapsed) toolbar.classList.add('collapsed');
     toolbar.innerHTML = `
-      <label>Bulk Patch Status:</label>
-      <select id="${STATUS_SEL_ID}">
-        <option value="activate">Set ACTIVE (turn ON)</option>
-        <option value="deactivate">Set INACTIVE (turn OFF)</option>
-      </select>
-      <button class="melon-bulk-btn" id="melon-bulk-apply">✓ Apply to Selected</button>
-      <span class="sep">|</span>
-      <button class="melon-bulk-btn" id="melon-bulk-selall">☑ Select All</button>
-      <button class="melon-bulk-btn" id="melon-bulk-selnone">☐ Deselect All</button>
-      <button class="melon-bulk-btn" id="${AUDIT_BTN_ID}" title="Hide all unchecked rows so you can review your selection in isolation.">🔍 Audit Selection</button>
-      <span class="sep">|</span>
-      <label for="melon-bulk-filter">Name contains:</label>
-      <input type="text" id="melon-bulk-filter" placeholder="e.g. desktop" autocomplete="off" spellcheck="false" />
-      <button class="melon-bulk-btn" id="melon-bulk-filter-add" title="Check rows whose name contains the text. Existing checks stay.">+ Select matching</button>
-      <button class="melon-bulk-btn" id="melon-bulk-filter-sub" title="Uncheck rows whose name contains the text. Other checks stay.">− Deselect matching</button>
-      <span id="melon-bulk-filter-count" style="color:#888;"></span>
-      <span class="sep">|</span>
-      <span id="${COUNT_ID}">0 selected</span>
-      <span class="sep">|</span>
-      <span style="color:#888;">Tip: <kbd>${navigator.platform.includes('Mac') ? '⌘' : 'Ctrl'}</kbd>+<kbd>A</kbd> in toolbar = Select All</span>
+      <div class="melon-bulk-header" title="Click to expand / collapse">
+        <span class="melon-title">🍈 Bulk Campaign Patch</span>
+        <span id="${HEADER_COUNT_ID}" class="empty">0 selected</span>
+        <span class="melon-spacer"></span>
+        <button id="${COLLAPSE_BTN_ID}" type="button" aria-label="Toggle bulk toolbar">${startCollapsed ? 'Expand ▼' : 'Collapse ▲'}</button>
+      </div>
+      <div class="melon-bulk-body">
+        <label>Bulk Patch Status:</label>
+        <select id="${STATUS_SEL_ID}">
+          <option value="activate">Set ACTIVE (turn ON)</option>
+          <option value="deactivate">Set INACTIVE (turn OFF)</option>
+        </select>
+        <button class="melon-bulk-btn" id="melon-bulk-apply">✓ Apply to Selected</button>
+        <span class="sep">|</span>
+        <button class="melon-bulk-btn" id="melon-bulk-selall">☑ Select All</button>
+        <button class="melon-bulk-btn" id="melon-bulk-selnone">☐ Deselect All</button>
+        <button class="melon-bulk-btn" id="${AUDIT_BTN_ID}" title="Hide all unchecked rows so you can review your selection in isolation.">🔍 Audit Selection</button>
+        <span class="sep">|</span>
+        <label for="melon-bulk-filter">Name contains:</label>
+        <input type="text" id="melon-bulk-filter" placeholder="e.g. desktop" autocomplete="off" spellcheck="false" />
+        <button class="melon-bulk-btn" id="melon-bulk-filter-add" title="Check rows whose name contains the text. Existing checks stay.">+ Select matching</button>
+        <button class="melon-bulk-btn" id="melon-bulk-filter-sub" title="Uncheck rows whose name contains the text. Other checks stay.">− Deselect matching</button>
+        <span id="melon-bulk-filter-count" style="color:#888;"></span>
+        <span class="sep">|</span>
+        <span id="${COUNT_ID}">0 selected</span>
+        <span class="sep">|</span>
+        <span style="color:#888;">Tip: <kbd>${navigator.platform.includes('Mac') ? '⌘' : 'Ctrl'}</kbd>+<kbd>A</kbd> in toolbar = Select All</span>
+      </div>
     `;
 
     const wrapper = table.closest('div') || table.parentElement;
@@ -275,6 +331,16 @@
     toolbar.querySelector('#melon-bulk-selnone').addEventListener('click', selectNone);
     toolbar.querySelector('#melon-bulk-apply').addEventListener('click', () => onApplyClicked(currentTable()));
     toolbar.querySelector(`#${AUDIT_BTN_ID}`).addEventListener('click', toggleAuditMode);
+
+    // Header click anywhere (except interactive elements inside it) toggles collapse.
+    const header = toolbar.querySelector('.melon-bulk-header');
+    header.addEventListener('click', (e) => {
+      if (e.target.closest('button, input, select, a')) {
+        // The collapse button itself handles toggling; ignore clicks on other controls.
+        if (e.target.id !== COLLAPSE_BTN_ID) return;
+      }
+      toggleCollapsed();
+    });
 
     const filterInput = toolbar.querySelector('#melon-bulk-filter');
     const filterAdd   = toolbar.querySelector('#melon-bulk-filter-add');
@@ -393,6 +459,16 @@
     updateCount();
   }
 
+  // ── Collapsed state ────────────────────────────────────────────────────────
+  function toggleCollapsed() {
+    const toolbar = document.getElementById(TOOLBAR_ID);
+    if (!toolbar) return;
+    const collapsed = toolbar.classList.toggle('collapsed');
+    const btn = toolbar.querySelector(`#${COLLAPSE_BTN_ID}`);
+    if (btn) btn.textContent = collapsed ? 'Expand ▼' : 'Collapse ▲';
+    try { localStorage.setItem(COLLAPSE_STORAGE_KEY, collapsed ? 'closed' : 'open'); } catch (_) {}
+  }
+
   // ── Audit Mode (isolation view) ────────────────────────────────────────────
   function toggleAuditMode() {
     const btn = document.getElementById(AUDIT_BTN_ID);
@@ -411,6 +487,11 @@
     const checked = all.filter(cb => cb.checked).length;
     const countEl = document.getElementById(COUNT_ID);
     if (countEl) countEl.textContent = `${checked} selected`;
+    const headerCountEl = document.getElementById(HEADER_COUNT_ID);
+    if (headerCountEl) {
+      headerCountEl.textContent = `${checked} selected`;
+      headerCountEl.classList.toggle('empty', checked === 0);
+    }
     const headerCb = document.getElementById(HEADER_CB_ID);
     if (headerCb) {
       headerCb.checked = checked > 0 && checked === all.length;
@@ -606,5 +687,5 @@
   observer.observe(document.body, { childList: true, subtree: true });
 
   ensureUI();
-  console.log('[Melon Bulk] v2.2.0 ready.');
+  console.log('[Melon Bulk] v2.3.0 ready.');
 })();
