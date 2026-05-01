@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Microsoft Ads - Dismiss All Recommendations
 // @namespace    http://tampermonkey.net/
-// @version      1.13
+// @version      1.14
 // @description  Adds a "Dismiss All" button to the Microsoft Advertising recommendations page
 // @author       You
 // @match        https://ui.ads.microsoft.com/*
@@ -14,7 +14,7 @@
 (function () {
   'use strict';
 
-  console.info('[DismissAll] userscript loaded (v1.13)');
+  console.info('[DismissAll] userscript loaded (v1.14)');
 
   let dismissObserver = null;
   let isRunning = false;
@@ -239,24 +239,29 @@
       return;
     }
     if (existing) return;
-    if (!document.body) return; // document-start: body may not exist yet
+    if (!document.documentElement) return;
 
     const btn = document.createElement('button');
     btn.id = 'tamper-dismiss-all-btn';
     btn.textContent = isRunning ? 'Dismissing...' : 'Dismiss All';
     btn.disabled = isRunning;
     btn.dataset.running = isRunning ? 'true' : 'false';
+    // Use !important so Microsoft's CSS-in-JS can't override us, and append to
+    // <html> rather than <body> so we're not trapped in body's stacking context.
     btn.style.cssText =
-      'position:fixed;bottom:24px;left:24px;z-index:2147483646;' +
-      'padding:10px 18px;background:#0078d4;color:#fff;' +
-      'border:none;border-radius:24px;cursor:pointer;' +
-      'font-size:13px;font-weight:600;' +
-      'box-shadow:0 4px 12px rgba(0,0,0,0.25);' +
-      'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;';
-    btn.addEventListener('mouseenter', () => { btn.style.background = '#106ebe'; });
-    btn.addEventListener('mouseleave', () => { btn.style.background = '#0078d4'; });
+      'position:fixed !important;bottom:24px !important;left:24px !important;' +
+      'z-index:2147483647 !important;' +
+      'padding:10px 18px !important;background:#0078d4 !important;color:#fff !important;' +
+      'border:none !important;border-radius:24px !important;cursor:pointer !important;' +
+      'font-size:13px !important;font-weight:600 !important;' +
+      'box-shadow:0 4px 12px rgba(0,0,0,0.25) !important;' +
+      'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif !important;' +
+      'pointer-events:auto !important;opacity:1 !important;visibility:visible !important;' +
+      'display:inline-block !important;';
+    btn.addEventListener('mouseenter', () => { btn.style.setProperty('background', '#106ebe', 'important'); });
+    btn.addEventListener('mouseleave', () => { btn.style.setProperty('background', '#0078d4', 'important'); });
     btn.addEventListener('mousedown', e => { e.preventDefault(); runDismissAll(); });
-    document.body.appendChild(btn);
+    document.documentElement.appendChild(btn);
   }
 
   let attachScheduled = false;
