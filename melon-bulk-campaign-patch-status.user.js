@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Melon Local – Bulk Campaign Patch Status
 // @namespace    https://thepatch.melonlocal.com/
-// @version      2.1.0
-// @description  Multiselect toolbar on the Campaigns grid for bulk Active/Inactive patch status changes. SPA-aware, sequential apply with verification, name-substring filter for additive select/deselect.
+// @version      2.2.0
+// @description  Multiselect toolbar on the Campaigns grid for bulk Active/Inactive patch status changes. Sticky toolbar, polled status verification, audit-selection isolation view, and Melon brand-colored progress.
 // @author       You
 // @match        https://thepatch.melonlocal.com/Agents/BudgetDetails*
 // @grant        none
@@ -23,7 +23,16 @@
   const CB_CELL_CLASS = 'melon-cb-cell';
   const BADGE_CLASS   = 'melon-state-badge';
   const STYLE_ID      = 'melon-bulk-style';
-  const CLICK_DELAY_MS = 200;
+  const AUDIT_BTN_ID  = 'melon-bulk-audit';
+  const AUDIT_BODY_CLASS = 'melon-audit-mode';
+
+  // Verification polling: check aria-checked every VERIFY_INTERVAL_MS for up to VERIFY_RETRIES attempts.
+  const VERIFY_INTERVAL_MS = 300;
+  const VERIFY_RETRIES     = 5;
+
+  // Melon Local brand colors.
+  const BRAND_ACTIVE  = '#6C2126';
+  const BRAND_SUCCESS = '#47B74F';
 
   // ── Debounce helper ────────────────────────────────────────────────────────
   function debounce(fn, ms) {
@@ -83,7 +92,7 @@
     style.textContent = `
       #${TOOLBAR_ID} {
         background: #fff;
-        border: 2px solid #4caf50;
+        border: 2px solid ${BRAND_SUCCESS};
         border-radius: 8px;
         padding: 12px 16px;
         margin-bottom: 12px;
@@ -93,7 +102,11 @@
         flex-wrap: wrap;
         font-family: inherit;
         font-size: 13px;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+        /* Sticky workflow UI — sit above Kendo grid headers (typically z-index 1–10) */
+        position: sticky;
+        top: 0;
+        z-index: 9999;
       }
       #${TOOLBAR_ID} label { font-weight: 600; color: #333; }
       #${TOOLBAR_ID} select,
@@ -119,18 +132,21 @@
         transition: background 0.2s;
       }
       .melon-bulk-btn[disabled] { opacity: 0.5; cursor: not-allowed; }
-      #melon-bulk-apply        { background: #4caf50; color: #fff; }
-      #melon-bulk-apply:hover  { background: #388e3c; }
+      #melon-bulk-apply        { background: ${BRAND_SUCCESS}; color: #fff; }
+      #melon-bulk-apply:hover  { background: #379b3d; }
+      #${AUDIT_BTN_ID}         { background: ${BRAND_ACTIVE}; color: #fff; }
+      #${AUDIT_BTN_ID}:hover   { background: #561a1f; }
+      #${AUDIT_BTN_ID}.active  { background: #561a1f; box-shadow: inset 0 0 0 2px #fff, 0 0 0 2px ${BRAND_ACTIVE}; }
       #melon-bulk-selall       { background: #1976d2; color: #fff; }
       #melon-bulk-selall:hover { background: #1256a0; }
       #melon-bulk-selnone      { background: #757575; color: #fff; }
       #melon-bulk-selnone:hover{ background: #424242; }
-      .melon-confirm-btn       { background: #4caf50; color: #fff; }
-      .melon-confirm-btn:hover { background: #388e3c; }
+      .melon-confirm-btn       { background: ${BRAND_SUCCESS}; color: #fff; }
+      .melon-confirm-btn:hover { background: #379b3d; }
       .melon-cancel-btn        { background: #757575; color: #fff; }
       .melon-cancel-btn:hover  { background: #424242; }
       #${COUNT_ID}             { color: #555; font-style: italic; }
-      .melon-row-cb            { width: 16px; height: 16px; cursor: pointer; accent-color: #4caf50; }
+      .melon-row-cb            { width: 16px; height: 16px; cursor: pointer; accent-color: ${BRAND_SUCCESS}; }
       .${CB_CELL_CLASS}        { text-align: center; white-space: nowrap; }
       .${BADGE_CLASS} {
         display: inline-block;
@@ -141,8 +157,11 @@
         border-radius: 10px;
         vertical-align: middle;
       }
-      .${BADGE_CLASS}.on  { background: #e8f5e9; color: #2e7d32; }
+      .${BADGE_CLASS}.on  { background: #e9f6ea; color: ${BRAND_SUCCESS}; }
       .${BADGE_CLASS}.off { background: #fafafa; color: #757575; border: 1px solid #e0e0e0; }
+
+      /* Audit mode: hide rows whose checkbox is not checked. Uses :has() for reactivity. */
+      body.${AUDIT_BODY_CLASS} tbody tr:not(:has(.${ROW_CB_CLASS}:checked)) { display: none; }
       #${TOOLBAR_ID} .sep { color: #ccc; }
       #${TOOLBAR_ID} kbd {
         font-size: 10px;
@@ -155,14 +174,17 @@
       }
       #${PANEL_ID} {
         background: #fff;
-        border: 2px solid #ff9800;
+        border: 2px solid ${BRAND_ACTIVE};
         border-radius: 8px;
         padding: 12px 16px;
         margin-bottom: 12px;
         font-size: 13px;
         box-shadow: 0 2px 8px rgba(0,0,0,0.1);
       }
-      #${PANEL_ID}.success { border-color: #4caf50; }
+      #${PANEL_ID}.active  { border-color: ${BRAND_ACTIVE}; }
+      #${PANEL_ID}.active .panel-title { color: ${BRAND_ACTIVE}; }
+      #${PANEL_ID}.success { border-color: ${BRAND_SUCCESS}; }
+      #${PANEL_ID}.success .panel-title { color: ${BRAND_SUCCESS}; }
       #${PANEL_ID}.error   { border-color: #e53935; }
       #${PANEL_ID} .panel-title { font-weight: 700; margin-bottom: 8px; }
       #${PANEL_ID} .panel-list {
@@ -177,7 +199,34 @@
         font-size: 12px;
       }
       #${PANEL_ID} .panel-actions { display: flex; gap: 8px; align-items: center; }
-      #${PANEL_ID} progress { width: 200px; height: 12px; }
+
+      /* Kendo-style progress: active uses brand-active, success uses brand-success */
+      #${PANEL_ID} progress {
+        width: 240px;
+        height: 14px;
+        appearance: none;
+        -webkit-appearance: none;
+        border: none;
+        border-radius: 7px;
+        overflow: hidden;
+        background: #f1e5e6;
+      }
+      #${PANEL_ID} progress::-webkit-progress-bar { background: #f1e5e6; border-radius: 7px; }
+      #${PANEL_ID} progress::-webkit-progress-value {
+        background: linear-gradient(90deg, ${BRAND_ACTIVE} 0%, #8b2a30 100%);
+        border-radius: 7px;
+        transition: width 120ms ease-out;
+      }
+      #${PANEL_ID} progress::-moz-progress-bar {
+        background: linear-gradient(90deg, ${BRAND_ACTIVE} 0%, #8b2a30 100%);
+        border-radius: 7px;
+      }
+      #${PANEL_ID}.success progress::-webkit-progress-value {
+        background: linear-gradient(90deg, ${BRAND_SUCCESS} 0%, #6cc972 100%);
+      }
+      #${PANEL_ID}.success progress::-moz-progress-bar {
+        background: linear-gradient(90deg, ${BRAND_SUCCESS} 0%, #6cc972 100%);
+      }
     `;
     document.head.appendChild(style);
   }
@@ -199,6 +248,7 @@
       <span class="sep">|</span>
       <button class="melon-bulk-btn" id="melon-bulk-selall">☑ Select All</button>
       <button class="melon-bulk-btn" id="melon-bulk-selnone">☐ Deselect All</button>
+      <button class="melon-bulk-btn" id="${AUDIT_BTN_ID}" title="Hide all unchecked rows so you can review your selection in isolation.">🔍 Audit Selection</button>
       <span class="sep">|</span>
       <label for="melon-bulk-filter">Name contains:</label>
       <input type="text" id="melon-bulk-filter" placeholder="e.g. desktop" autocomplete="off" spellcheck="false" />
@@ -217,6 +267,7 @@
     toolbar.querySelector('#melon-bulk-selall').addEventListener('click', selectAll);
     toolbar.querySelector('#melon-bulk-selnone').addEventListener('click', selectNone);
     toolbar.querySelector('#melon-bulk-apply').addEventListener('click', () => onApplyClicked(table));
+    toolbar.querySelector(`#${AUDIT_BTN_ID}`).addEventListener('click', toggleAuditMode);
 
     const filterInput = toolbar.querySelector('#melon-bulk-filter');
     const filterAdd   = toolbar.querySelector('#melon-bulk-filter-add');
@@ -335,6 +386,19 @@
     updateCount();
   }
 
+  // ── Audit Mode (isolation view) ────────────────────────────────────────────
+  function toggleAuditMode() {
+    const btn = document.getElementById(AUDIT_BTN_ID);
+    const on = document.body.classList.toggle(AUDIT_BODY_CLASS);
+    if (btn) {
+      btn.classList.toggle('active', on);
+      btn.textContent = on ? '👁 Show All' : '🔍 Audit Selection';
+      btn.title = on
+        ? 'Restore the full row list.'
+        : 'Hide all unchecked rows so you can review your selection in isolation.';
+    }
+  }
+
   function updateCount() {
     const all = getRowCheckboxes();
     const checked = all.filter(cb => cb.checked).length;
@@ -387,7 +451,7 @@
       <div class="panel-title">Applying changes…</div>
       <progress id="melon-progress" value="0" max="${total}"></progress>
       <span id="melon-progress-text" style="margin-left:10px;">0 / ${total}</span>
-    `);
+    `, 'active');
     return {
       update(done) {
         if (!panel) return;
@@ -421,6 +485,20 @@
 
   function escapeHtml(s) {
     return String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
+  }
+
+  // ── Status verification (polled, with retries) ─────────────────────────────
+  // Returns true as soon as aria-checked matches targetState. Polls every
+  // VERIFY_INTERVAL_MS (default 300ms) up to `retries` attempts. Only returns
+  // false if every attempt fails.
+  async function verifyStatus(row, targetState, retries = VERIFY_RETRIES) {
+    const sw = getRowSwitch(row);
+    if (!sw) return false;
+    for (let i = 0; i < retries; i++) {
+      if (isSwitchActive(sw) === targetState) return true;
+      if (i < retries - 1) await sleep(VERIFY_INTERVAL_MS);
+    }
+    return false;
   }
 
   // ── Apply ──────────────────────────────────────────────────────────────────
@@ -458,13 +536,12 @@
 
     for (let i = 0; i < targets.length; i++) {
       const t = targets[i];
-      const isActive = isSwitchActive(t.sw);
-      if (isActive === wantActive) {
+      if (isSwitchActive(t.sw) === wantActive) {
         results.alreadyOK++;
       } else {
         t.sw.click();
-        await sleep(CLICK_DELAY_MS);
-        if (isSwitchActive(t.sw) === wantActive) {
+        const verified = await verifyStatus(t.row, wantActive);
+        if (verified) {
           results.changed++;
         } else {
           results.failed.push(t.name);
@@ -522,5 +599,5 @@
   observer.observe(document.body, { childList: true, subtree: true });
 
   ensureUI();
-  console.log('[Melon Bulk] v2.0.0 ready.');
+  console.log('[Melon Bulk] v2.2.0 ready.');
 })();
