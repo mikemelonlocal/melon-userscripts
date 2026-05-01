@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Melon Local – Bulk Campaign Patch Status
 // @namespace    https://thepatch.melonlocal.com/
-// @version      2.2.0
+// @version      2.2.1
 // @description  Multiselect toolbar on the Campaigns grid for bulk Active/Inactive patch status changes. Sticky toolbar, polled status verification, audit-selection isolation view, and Melon brand-colored progress.
 // @author       You
 // @match        https://thepatch.melonlocal.com/Agents/BudgetDetails*
@@ -53,10 +53,13 @@
   }
 
   // ── Find the column index of the campaign name by header text ──────────────
+  // Returns the index in the *original* table coordinates (excluding our
+  // injected checkbox column). Callers should add +1 when indexing into a
+  // post-injection row, since we always insert our column at index 0.
   function findNameColumnIndex(table) {
     const headerRow = table.querySelector('thead tr') || table.querySelector('tr');
     if (!headerRow) return 0;
-    const headers = Array.from(headerRow.children);
+    const headers = Array.from(headerRow.children).filter(h => !h.classList.contains(CB_CELL_CLASS));
     const idx = headers.findIndex(h => /name|campaign/i.test((h.innerText || '').trim()));
     return idx >= 0 ? idx : 0;
   }
@@ -264,28 +267,32 @@
     const wrapper = table.closest('div') || table.parentElement;
     wrapper.insertBefore(toolbar, table);
 
+    // All handlers re-resolve the current table via findCampaignTable() so
+    // they keep working after an SPA re-render replaces the table node.
+    const currentTable = () => findCampaignTable() || table;
+
     toolbar.querySelector('#melon-bulk-selall').addEventListener('click', selectAll);
     toolbar.querySelector('#melon-bulk-selnone').addEventListener('click', selectNone);
-    toolbar.querySelector('#melon-bulk-apply').addEventListener('click', () => onApplyClicked(table));
+    toolbar.querySelector('#melon-bulk-apply').addEventListener('click', () => onApplyClicked(currentTable()));
     toolbar.querySelector(`#${AUDIT_BTN_ID}`).addEventListener('click', toggleAuditMode);
 
     const filterInput = toolbar.querySelector('#melon-bulk-filter');
     const filterAdd   = toolbar.querySelector('#melon-bulk-filter-add');
     const filterSub   = toolbar.querySelector('#melon-bulk-filter-sub');
-    const refreshFilterCount = () => updateFilterMatchCount(table, filterInput.value);
+    const refreshFilterCount = () => updateFilterMatchCount(currentTable(), filterInput.value);
     filterInput.addEventListener('input', refreshFilterCount);
     filterAdd.addEventListener('click', () => {
-      filterMatchingRows(table, filterInput.value, true);
+      filterMatchingRows(currentTable(), filterInput.value, true);
       refreshFilterCount();
     });
     filterSub.addEventListener('click', () => {
-      filterMatchingRows(table, filterInput.value, false);
+      filterMatchingRows(currentTable(), filterInput.value, false);
       refreshFilterCount();
     });
     filterInput.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
         e.preventDefault();
-        filterMatchingRows(table, filterInput.value, !e.shiftKey);
+        filterMatchingRows(currentTable(), filterInput.value, !e.shiftKey);
         refreshFilterCount();
       }
     });
