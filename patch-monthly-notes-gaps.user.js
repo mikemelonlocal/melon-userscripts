@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Patch Monthly Notes Gaps
 // @namespace    http://tampermonkey.net/
-// @version      1.0.9
+// @version      1.0.10
 // @description  On the Patch Calls grid, identify months missing a final-status call (Completed, Canceled, Agent No Show) for a given year by title, and bulk-archive calls for that year by title. Uses the Melon color palette and only appears on the Calls tab.
 // @author       Melon Local
 // @match        https://thepatch.melonlocal.com/Agents/Dashboard/*
@@ -20,7 +20,7 @@
 
   // Keep CURRENT_VERSION in sync with @version in the metadata block above.
   // VERSION is the human-readable tag used in console logs and window export.
-  const CURRENT_VERSION = "1.0.9";
+  const CURRENT_VERSION = "1.0.10";
   const VERSION = `monthly-notes-gaps-v${CURRENT_VERSION}`;
 
   // -----------------------------
@@ -36,6 +36,8 @@
   const DOCK_WIDTH_PX = 340;
   // CSS class applied to the panel when docked. Drag handler bails on this.
   const DOCKED_CLASS = "pmng-docked";
+  // Stable ID this script uses when registering with the shared dock manager.
+  const DOCK_ID = "patch-monthly-notes-gaps";
 
   // Auto-update: lightweight in-panel notice that complements Tampermonkey's
   // own update mechanism (driven by @updateURL / @downloadURL above).
@@ -165,6 +167,99 @@
       return null;
     }
   }
+
+  // -----------------------------
+  // Shared dock manager (cross-script coordination)
+  // -----------------------------
+  /**
+   * Coordinates multiple Melon Local userscripts that dock to the right edge.
+   *
+   * Communicates across scripts (including sandboxed `@grant GM_*` contexts,
+   * which don't share `window`) by stashing the dock list as JSON on
+   * `<body data-melon-local-docks="...">` and broadcasting a custom DOM event.
+   * `document` is shared regardless of grant mode, so this works in either
+   * direction between sandboxed and page-context scripts.
+   *
+   * Each script keeps its own `onLayout` callbacks locally — functions can't
+   * round-trip through the JSON channel. When any script writes the shared
+   * state, every script's listener fires and reflows its own registered
+   * panels.
+   *
+   * API:
+   *   register(id, width, onLayout): claim a slot; onLayout(offset, total)
+   *   unregister(id): release the slot; siblings reflow
+   *
+   * The first registered slot ends up flush against the viewport's right edge
+   * (offset 0); subsequent slots stack to its left. body.style.marginRight
+   * always equals the sum of all registered widths.
+   */
+  const DockManager = (function createMelonDockManager() {
+    const ATTR = "data-melon-local-docks";
+    const EVENT = "melon-local-docks-changed";
+    const localCallbacks = new Map();
+
+    const readSharedDocks = () => {
+      try {
+        const raw = document.body && document.body.getAttribute(ATTR);
+        return raw ? JSON.parse(raw) : [];
+      } catch (e) {
+        return [];
+      }
+    };
+
+    const writeSharedDocks = (arr) => {
+      if (!document.body) return;
+      document.body.setAttribute(ATTR, JSON.stringify(arr));
+      document.dispatchEvent(new CustomEvent(EVENT));
+    };
+
+    const reflow = () => {
+      const docks = readSharedDocks();
+      let total = 0;
+      for (const d of docks) total += d.width;
+      try {
+        document.body.style.marginRight = total ? `${total}px` : "";
+      } catch (e) { /* body may not exist in edge cases */ }
+
+      // For each id, compute its right-offset = sum of widths AFTER its slot.
+      // Walking in reverse builds that cumulative-from-the-right value cheaply.
+      const offsets = new Map();
+      let cumulative = 0;
+      for (let i = docks.length - 1; i >= 0; i--) {
+        offsets.set(docks[i].id, cumulative);
+        cumulative += docks[i].width;
+      }
+      for (const [id, cb] of localCallbacks) {
+        const offset = offsets.get(id);
+        if (typeof offset === "number") {
+          try {
+            cb(offset, total);
+          } catch (e) {
+            console.warn("[MelonDockManager] onLayout callback threw:", e);
+          }
+        }
+      }
+    };
+
+    document.addEventListener(EVENT, reflow);
+
+    return {
+      register(id, width, onLayout) {
+        localCallbacks.set(id, onLayout);
+        const docks = readSharedDocks().filter((d) => d.id !== id);
+        docks.push({ id, width });
+        writeSharedDocks(docks);
+      },
+      unregister(id) {
+        localCallbacks.delete(id);
+        const docks = readSharedDocks().filter((d) => d.id !== id);
+        writeSharedDocks(docks);
+      },
+      has(id) { return localCallbacks.has(id); },
+      listLocal() { return [...localCallbacks.keys()]; },
+      listShared() { return readSharedDocks().map((d) => d.id); }
+    };
+  })();
 
   // -----------------------------
   // UI persistence helpers
@@ -918,18 +1013,26 @@
         box.classList.add(DOCKED_CLASS);
         box.style.left = "auto";
         box.style.top = "0";
-        box.style.right = "0";
         box.style.bottom = "0";
         box.style.width = `${DOCK_WIDTH_PX}px`;
         box.style.height = "100vh";
         box.style.maxHeight = "100vh";
         box.style.borderRadius = "0";
         box.style.boxShadow = "-4px 0 24px rgba(0,0,0,0.18)";
-        // Shift the host page content left so the dock doesn't cover it.
-        document.body.style.marginRight = `${DOCK_WIDTH_PX}px`;
+
+        // Register with the shared manager. It owns body.marginRight and the
+        // horizontal stacking — our callback just plants `right` so we sit at
+        // the correct slot when other panels are also docked.
+        DockManager.register(DOCK_ID, DOCK_WIDTH_PX, (offset) => {
+          box.style.right = `${offset}px`;
+        });
+
         dockBtn.textContent = "Undock";
         dockBtn.title = "Return to floating panel";
       } else {
+        // Release our slot first so others reflow without our width.
+        DockManager.unregister(DOCK_ID);
+
         box.classList.remove(DOCKED_CLASS);
         box.style.right = "auto";
         box.style.bottom = "auto";
@@ -938,7 +1041,6 @@
         box.style.maxHeight = "";
         box.style.borderRadius = "8px";
         box.style.boxShadow = "0 4px 10px rgba(0,0,0,0.15)";
-        document.body.style.marginRight = "";
         // Restore the floating position the user had before docking, falling
         // back to the persisted position or the default bottom-right.
         const restore = savedFloatPos || loadUiPos();
@@ -1001,11 +1103,13 @@
     if (window.__patchMonthlyNotesGapsToast) {
       delete window.__patchMonthlyNotesGapsToast;
     }
-    // Always clear the body margin we may have set while docked, so leaving
-    // the Calls view doesn't leave the host page squashed.
-    if (document.body && document.body.style.marginRight) {
-      document.body.style.marginRight = "";
-    }
+    // Release our slot in the shared dock manager (if held). The manager
+    // recomputes body.marginRight, so any sibling panels that are still
+    // docked stay properly laid out — we don't yank the margin from under
+    // them the way a blanket reset would.
+    try {
+      DockManager.unregister(DOCK_ID);
+    } catch (e) { /* best-effort cleanup */ }
   }
 
   // -----------------------------
