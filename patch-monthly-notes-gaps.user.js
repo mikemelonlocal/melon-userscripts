@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Patch Monthly Notes Gaps
 // @namespace    http://tampermonkey.net/
-// @version      1.0.10
+// @version      1.0.11
 // @description  On the Patch Calls grid, identify months missing a final-status call (Completed, Canceled, Agent No Show) for a given year by title, and bulk-archive calls for that year by title. Uses the Melon color palette and only appears on the Calls tab.
 // @author       Melon Local
 // @match        https://thepatch.melonlocal.com/Agents/Dashboard/*
@@ -20,7 +20,7 @@
 
   // Keep CURRENT_VERSION in sync with @version in the metadata block above.
   // VERSION is the human-readable tag used in console logs and window export.
-  const CURRENT_VERSION = "1.0.10";
+  const CURRENT_VERSION = "1.0.11";
   const VERSION = `monthly-notes-gaps-v${CURRENT_VERSION}`;
 
   // -----------------------------
@@ -221,23 +221,19 @@
         document.body.style.marginRight = total ? `${total}px` : "";
       } catch (e) { /* body may not exist in edge cases */ }
 
-      // For each id, compute its right-offset = sum of widths AFTER its slot.
-      // Walking in reverse builds that cumulative-from-the-right value cheaply.
-      const offsets = new Map();
-      let cumulative = 0;
-      for (let i = docks.length - 1; i >= 0; i--) {
-        offsets.set(docks[i].id, cumulative);
-        cumulative += docks[i].width;
-      }
-      for (const [id, cb] of localCallbacks) {
-        const offset = offsets.get(id);
-        if (typeof offset === "number") {
+      // First-registered panel keeps right:0 (rightmost slot); each subsequent
+      // panel is pushed leftward by the cumulative width of earlier panels.
+      let offset = 0;
+      for (const d of docks) {
+        const cb = localCallbacks.get(d.id);
+        if (cb) {
           try {
             cb(offset, total);
           } catch (e) {
             console.warn("[MelonDockManager] onLayout callback threw:", e);
           }
         }
+        offset += d.width;
       }
     };
 
