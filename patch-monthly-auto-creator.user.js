@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Patch Monthly Auto-Creator
 // @namespace    http://tampermonkey.net/
-// @version      1.4.2
+// @version      1.4.3
 // @description  Create next month's Monthly call based on the latest one on the current agent's Calls tab
 // @match        https://thepatch.melonlocal.com/Agents/Dashboard/*
 // @match        https://thepatch.melonlocal.com/agents/dashboard/*
@@ -116,42 +116,31 @@
     style.id = CONFIG.DOM_IDS.STYLES;
     // !important throughout so we beat any host stylesheet without copying
     // computed styles off another button at runtime.
+    // Strategy: the button gets Patch's own "btn melon-green" classes so
+    // layout (font, padding, height, border-radius) matches the page exactly.
+    // .melon-auto-create-btn only overrides the colors using BRAND tokens
+    // and adds the spacing/state polish — no layout values redefined here.
     style.textContent = `
       .${CONFIG.CSS_CLASSES.AUTO_BTN} {
-        display: inline-flex !important;
-        align-items: center !important;
-        justify-content: center !important;
-        box-sizing: border-box !important;
-        /* Explicit values — never 'inherit' for font/padding, because the
-           nearest text scope on Patch is much larger than .btn.melon-green
-           (was producing a giant button when font-size inherited). */
-        padding: 6px 16px !important;
         margin-right: 8px !important;
-        height: auto !important;
-        min-height: 0 !important;
-        max-height: none !important;
-        border: 1px solid ${BRAND.Cactus} !important;
-        background: ${BRAND.Cactus} !important;
-        color: ${BRAND.Alpine} !important;
-        border-radius: 999px !important;
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif !important;
-        font-size: 14px !important;
-        font-weight: 600 !important;
-        line-height: 1.5 !important;
-        letter-spacing: 0.02em !important;
         white-space: nowrap !important;
         cursor: pointer !important;
-        vertical-align: middle !important;
+        background: ${BRAND.Cactus} !important;
+        border-color: ${BRAND.Cactus} !important;
+        color: ${BRAND.Alpine} !important;
+        letter-spacing: 0.02em !important;
         transition: background-color 120ms ease, border-color 120ms ease, box-shadow 120ms ease !important;
       }
       .${CONFIG.CSS_CLASSES.AUTO_BTN}:hover {
         background: ${BRAND.Pine} !important;
         border-color: ${BRAND.Pine} !important;
+        color: ${BRAND.Alpine} !important;
       }
       .${CONFIG.CSS_CLASSES.AUTO_BTN}:focus {
         outline: none !important;
         background: ${BRAND.Pine} !important;
         border-color: ${BRAND.Pine} !important;
+        color: ${BRAND.Alpine} !important;
         box-shadow: 0 0 0 2px ${BRAND.Alpine}, 0 0 0 4px ${BRAND.Pine} !important;
       }
       .${CONFIG.CSS_CLASSES.AUTO_BTN}:active {
@@ -164,6 +153,7 @@
       button.addNewCall {
         white-space: nowrap !important;
         word-break: keep-all !important;
+        min-width: max-content !important;
       }
       /* Transparent input-blocker shown while a save is in flight. */
       #${CONFIG.DOM_IDS.OVERLAY} {
@@ -833,10 +823,16 @@
     const btn = document.createElement("button");
     btn.id = CONFIG.DOM_IDS.AUTO_BTN;
     btn.type = "button";
-    btn.className = CONFIG.CSS_CLASSES.AUTO_BTN;
+    // "btn melon-green" gives us Patch's exact button layout/typography.
+    // "melon-auto-create-btn" is our color/spacing override layer.
+    // Crucially we do NOT add "addNewCall" — that class is what triggers
+    // Patch's New Call modal, and we want our own click handler to run instead.
+    btn.className = `btn melon-green ${CONFIG.CSS_CLASSES.AUTO_BTN}`;
     btn.textContent = "Create Next Monthly Call";
 
-    btn.addEventListener("click", () => {
+    btn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
       createNextMonthlyCallFromLatest();
     });
 
