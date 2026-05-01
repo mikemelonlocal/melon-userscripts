@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Melon Local – Bulk Campaign Patch Status
 // @namespace    https://thepatch.melonlocal.com/
-// @version      3.0.1
+// @version      3.0.2
 // @description  Bulk Active/Inactive campaign patch status tool. Sticky collapsible toolbar, pill look-ahead counts, row processing spinner, undo/rollback buffer, Action FAB, budget-status guard, polled verification.
 // @author       You
 // @match        https://thepatch.melonlocal.com/Agents/BudgetDetails*
@@ -52,7 +52,7 @@
     { key: 'renters', label: 'Renters', terms: ['renters'] },
     { key: 'condo',   label: 'Condo',   terms: ['condo'] },
     { key: 'branded', label: 'Branded', terms: ['brand'] },
-    { key: 'fire',    label: 'Fire',    terms: ['home', 'renters'] },
+    { key: 'fire',    label: 'Fire',    terms: ['home', 'renters', 'condo'] },
     { key: 'quote',   label: 'Quote',   terms: ['auto', '004'] },
   ];
 
@@ -915,5 +915,5 @@
   new MutationObserver(debouncedEnsure).observe(document.body, { childList: true, subtree: true });
 
   ensureUI();
-  console.log('[Melon Bulk] v3.0.1 ready.');
+  console.log('[Melon Bulk] v3.0.2 ready.');
 })();
