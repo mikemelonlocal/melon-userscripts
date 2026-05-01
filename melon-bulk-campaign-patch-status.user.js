@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Melon Local – Bulk Campaign Patch Status
 // @namespace    https://thepatch.melonlocal.com/
-// @version      2.4.0
-// @description  Multiselect toolbar on the Campaigns grid for bulk Active/Inactive patch status changes. Collapsible sticky toolbar, polled status verification, audit-selection isolation view, Melon brand-colored progress, and multipronged device/product preset filters.
+// @version      2.5.0
+// @description  Multiselect toolbar on the Campaigns grid for bulk Active/Inactive patch status changes. Collapsible sticky toolbar, polled status verification, budget-status guard, audit-selection isolation view, Melon brand-colored progress, and multipronged device/product preset filters.
 // @author       You
 // @match        https://thepatch.melonlocal.com/Agents/BudgetDetails*
 // @grant        none
@@ -740,6 +740,39 @@
     const wantActive = document.getElementById(STATUS_SEL_ID).value === 'activate';
     const action = wantActive ? 'ACTIVE' : 'INACTIVE';
 
+    // ── Budget-status guard ────────────────────────────────────────────────
+    // Block deactivating all campaigns while the budget itself is Active —
+    // at least one campaign must stay Active when the budget is.
+    if (!wantActive) {
+      const budgetStatusText = document.querySelector('.k-dropdownlist .k-input-value-text')?.innerText?.trim();
+      if (budgetStatusText?.toLowerCase() === 'active') {
+        const allDataRows = Array.from(table.querySelectorAll('tbody tr'));
+        const activeRows  = allDataRows.filter(r => isSwitchActive(getRowSwitch(r)));
+        const activeRowsInSelection = activeRows.filter(r => rows.includes(r));
+
+        if (activeRowsInSelection.length === activeRows.length) {
+          const activeNames = activeRows
+            .map(r => '• ' + getRowName(table, r))
+            .join('\n');
+          showPanel(`
+            <div class="panel-title">⚠️ Cannot deactivate all campaigns</div>
+            <div style="margin-bottom:8px;">
+              The budget status is <b>Active</b> — at least one campaign must remain Active.
+              Deselect at least one currently-active campaign and try again.
+            </div>
+            <div style="font-size:12px;color:#555;margin-bottom:8px;">Currently active campaigns in your selection:</div>
+            <pre class="panel-list">${escapeHtml(activeNames)}</pre>
+            <div class="panel-actions">
+              <button class="melon-bulk-btn melon-cancel-btn" id="melon-result-dismiss">Dismiss</button>
+            </div>
+          `, 'error');
+          document.getElementById(PANEL_ID)?.querySelector('#melon-result-dismiss')?.addEventListener('click', removePanel);
+          return;
+        }
+      }
+    }
+    // ── End budget-status guard ────────────────────────────────────────────
+
     const targets = rows.map(row => {
       const sw = getRowSwitch(row);
       return {
@@ -824,5 +857,5 @@
   observer.observe(document.body, { childList: true, subtree: true });
 
   ensureUI();
-  console.log('[Melon Bulk] v2.4.0 ready.');
+  console.log('[Melon Bulk] v2.5.0 ready.');
 })();
