@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Patch Monthly Auto-Creator
 // @namespace    http://tampermonkey.net/
-// @version      1.4.1
+// @version      1.4.2
 // @description  Create next month's Monthly call based on the latest one on the current agent's Calls tab
 // @match        https://thepatch.melonlocal.com/Agents/Dashboard/*
 // @match        https://thepatch.melonlocal.com/agents/dashboard/*
@@ -122,19 +122,26 @@
         align-items: center !important;
         justify-content: center !important;
         box-sizing: border-box !important;
-        padding: 8px 18px !important;
+        /* Explicit values — never 'inherit' for font/padding, because the
+           nearest text scope on Patch is much larger than .btn.melon-green
+           (was producing a giant button when font-size inherited). */
+        padding: 6px 16px !important;
         margin-right: 8px !important;
+        height: auto !important;
+        min-height: 0 !important;
+        max-height: none !important;
         border: 1px solid ${BRAND.Cactus} !important;
         background: ${BRAND.Cactus} !important;
         color: ${BRAND.Alpine} !important;
         border-radius: 999px !important;
-        font-family: inherit !important;
-        font-size: inherit !important;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif !important;
+        font-size: 14px !important;
         font-weight: 600 !important;
-        line-height: 1.4 !important;
+        line-height: 1.5 !important;
         letter-spacing: 0.02em !important;
         white-space: nowrap !important;
         cursor: pointer !important;
+        vertical-align: middle !important;
         transition: background-color 120ms ease, border-color 120ms ease, box-shadow 120ms ease !important;
       }
       .${CONFIG.CSS_CLASSES.AUTO_BTN}:hover {
@@ -150,9 +157,13 @@
       .${CONFIG.CSS_CLASSES.AUTO_BTN}:active {
         transform: translateY(1px);
       }
-      /* Keep the original "New Call" button on a single line */
-      ${CONFIG.SELECTORS.NEW_CALL_PRIMARY} {
+      /* Keep the "New Call" button on a single line. Broad selector — covers
+         class drift on Patch's side (e.g. if .addNewCall is dropped). */
+      ${CONFIG.SELECTORS.NEW_CALL_PRIMARY},
+      button.melon-green,
+      button.addNewCall {
         white-space: nowrap !important;
+        word-break: keep-all !important;
       }
       /* Transparent input-blocker shown while a save is in flight. */
       #${CONFIG.DOM_IDS.OVERLAY} {
