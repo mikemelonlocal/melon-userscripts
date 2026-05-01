@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Daily Cap Calculator - Melon Local (Enhanced)
 // @namespace    https://thepatch.melonlocal.com/
-// @version      3.6.0
+// @version      3.7.0
 // @description  Paces budgets evenly through end of month. Auto-fills from page data. Refresh + Freeze. Enhanced with auto-save, export/import, keyboard shortcuts, and improved UX.
 // @author       Melon Local
 // @match        https://thepatch.melonlocal.com/*
@@ -733,6 +733,41 @@
       color: #86efac;
     }
 
+    /* ── Per-budget CPE override (shown when event cap toggle is on) ────── */
+    .dcc-budget-cpe-wrap {
+      display: none;
+      align-items: center;
+      gap: 3px;
+      flex-shrink: 0;
+    }
+
+    .dcc-budget-cpe-wrap.visible {
+      display: inline-flex;
+    }
+
+    .dcc-budget-cpe-label {
+      font-size: 10px;
+      font-weight: 700;
+      color: #b45309;
+      white-space: nowrap;
+    }
+
+    .dcc-budget-cpe-wrap input {
+      width: 54px;
+      padding: 5px 6px;
+      border: 1.5px solid #fcd34d;
+      border-radius: 5px;
+      font-size: 11px;
+      color: #222;
+      background: #fffbeb;
+      transition: border-color 0.2s;
+    }
+
+    .dcc-budget-cpe-wrap input:focus {
+      outline: none;
+      border-color: #f59e0b;
+    }
+
     /* ── Live Pacing border colors on spend inputs ───────────────────────── */
     /* These !important rules beat the active-spend / inactive-spend classes  */
     .dcc-input.dcc-pacing-behind  { border-color: #2563eb !important; background: #eff6ff !important; }
@@ -769,7 +804,8 @@
             desc: row.querySelector('.calc-budget-desc')?.value || '',
             cap: row.querySelector('.calc-budget-cap')?.value || '',
             weekdays: row.querySelector('.calc-budget-weekdays')?.checked || false,
-            spent: rawSpent === '' || rawSpent === undefined ? null : parseFloat(rawSpent)
+            spent: rawSpent === '' || rawSpent === undefined ? null : parseFloat(rawSpent),
+            cpe: row.querySelector('.calc-budget-cpe')?.value || ''
           });
         });
 
@@ -1052,8 +1088,12 @@
           const rawSpent = row.dataset.spent;
           const spent = rawSpent === '' || rawSpent === undefined ? null : parseFloat(rawSpent);
 
+          // Per-budget CPE override (null = use product-level fallback)
+          const rawBudgetCpe = parseFloat(row.querySelector('.calc-budget-cpe')?.value);
+          const budgetCpe = !isNaN(rawBudgetCpe) && rawBudgetCpe > 0 ? rawBudgetCpe : null;
+
           if (!isNaN(cap) && cap > 0) {
-            budgets.push({ desc, cap, weekdays, spent: isNaN(spent) ? null : spent });
+            budgets.push({ desc, cap, weekdays, spent: isNaN(spent) ? null : spent, budgetCpe });
             totalMonthlyCap += cap;
           }
         });
@@ -1121,7 +1161,14 @@
           </div>`;
         }
 
-        const eventCapHeader = useEventCap && !isNaN(cpe) && cpe > 0
+        // Event cap column is shown when the toggle is on AND at least one CPE exists
+        // (either the product-level default or a per-budget override).
+        const productCpeValid = !isNaN(cpe) && cpe > 0;
+        const hasAnyEventCap = useEventCap && (
+          productCpeValid || budgets.some(b => b.budgetCpe != null)
+        );
+
+        const eventCapHeader = hasAnyEventCap
           ? `<th style="color:#d97706;">${cpeLabel} Cap</th>`
           : '';
 
@@ -1134,8 +1181,14 @@
           const dailyCap = budgetSpend / budget.days;
           const dayLabel = budget.weekdays ? 'weekday' : 'day';
           const daysCell = `${budget.days} ${dayLabel}${budget.days !== 1 ? 's' : ''}`;
-          const eventCapCell = useEventCap && !isNaN(cpe) && cpe > 0
-            ? `<td class="dcc-event-cap-val">${Math.round(dailyCap / cpe)}</td>`
+
+          // Effective CPE: per-budget override wins, else fall back to product default
+          const effectiveCpe = budget.budgetCpe ?? (productCpeValid ? cpe : null);
+          const cpeSource = budget.budgetCpe != null ? '(budget rate)' : '(product rate)';
+          const eventCapCell = hasAnyEventCap
+            ? (effectiveCpe != null
+                ? `<td class="dcc-event-cap-val" title="CPE $${effectiveCpe.toFixed(2)} ${cpeSource}">${Math.round(dailyCap / effectiveCpe)}</td>`
+                : '<td style="color:#9ca3af;" title="No CPE set for this budget">—</td>')
             : '';
 
           const pStyle = this.pacingStyle(budget.pacingPct);
@@ -1156,11 +1209,18 @@
           `;
         });
 
-        const footerColspan = useEventCap && !isNaN(cpe) && cpe > 0 ? 7 : 6;
-        const eventFooter = useEventCap && !isNaN(cpe) && cpe > 0
-          ? `<tr><td colspan="${footerColspan}" style="padding-top:6px;font-size:10px;color:#92400e;background:#fffbeb;">
-              &#128200; Event Cap = Daily Cap &divide; $${cpe.toFixed(2)} cost per ${cpeLabel.toLowerCase().replace(/s$/, '')} (prev. month avg)
-            </td></tr>`
+        const footerColspan = hasAnyEventCap ? 7 : 6;
+        const eventFooter = hasAnyEventCap
+          ? (() => {
+              const defaultNote = productCpeValid
+                ? `default $${cpe.toFixed(2)} per ${cpeLabel.toLowerCase().replace(/s$/, '')}`
+                : 'no product default';
+              const hasOverrides = budgets.some(b => b.budgetCpe != null);
+              const overrideNote = hasOverrides ? ' · per-budget rates override default' : '';
+              return `<tr><td colspan="${footerColspan}" style="padding-top:6px;font-size:10px;color:#92400e;background:#fffbeb;">
+                &#128200; Event Cap = Daily Cap &divide; CPE (${defaultNote}${overrideNote})
+              </td></tr>`;
+            })()
           : '';
 
         // Overall pacing summary line (only when we have enough data to compute it)
@@ -1488,7 +1548,7 @@
   // ============================================================================
 
   const UI = {
-    addBudgetRow(listEl, desc = '', cap = '', weekdays = false, spent = null) {
+    addBudgetRow(listEl, desc = '', cap = '', weekdays = false, spent = null, cpe = '', showCpe = false) {
       State.budgetCounter++;
       const row = document.createElement('div');
       row.className = 'dcc-budget-row';
@@ -1533,12 +1593,29 @@
         Storage.autoSave();
       });
 
+      // Per-budget CPE override — visible only when the product event toggle is on
+      const cpeWrap = document.createElement('div');
+      cpeWrap.className = 'dcc-budget-cpe-wrap' + (showCpe ? ' visible' : '');
+      cpeWrap.title = 'Cost per event for this budget type (leave blank to use the product default)';
+      const cpeLabel = document.createElement('span');
+      cpeLabel.className = 'dcc-budget-cpe-label';
+      cpeLabel.textContent = '$/evt';
+      const cpeInput = document.createElement('input');
+      cpeInput.type = 'number';
+      cpeInput.placeholder = 'CPE';
+      cpeInput.value = cpe || '';
+      cpeInput.min = '0';
+      cpeInput.step = '0.01';
+      cpeInput.className = 'calc-budget-cpe';
+      cpeInput.addEventListener('input', () => Storage.autoSave());
+      cpeWrap.append(cpeLabel, cpeInput);
+
       const removeBtn = document.createElement('button');
       removeBtn.className = 'dcc-remove-btn';
       removeBtn.innerHTML = '&times;';
       removeBtn.title = 'Remove budget';
 
-      row.append(descInput, dollar, capInput, wkLabel, removeBtn);
+      row.append(descInput, dollar, capInput, wkLabel, cpeWrap, removeBtn);
       listEl.appendChild(row);
     },
 
@@ -1686,28 +1763,35 @@
       // Budgets list
       const budgetsList = productBlock.querySelector('.dcc-budget-rows-list');
 
+      // Event toggle — resolve here so we know showCpe for addBudgetRow
+      const eventToggle    = productBlock.querySelector('.dcc-event-toggle');
+      const eventSection   = productBlock.querySelector('.dcc-event-section');
+      const eventToggleRow = productBlock.querySelector('.dcc-toggle-row');
+
+      // Helper: show or hide all per-budget CPE wraps within this product
+      const setCpeWrapsVisible = (visible) => {
+        productBlock.querySelectorAll('.dcc-budget-cpe-wrap').forEach(w => {
+          w.classList.toggle('visible', visible);
+        });
+      };
+
       if (budgets.length) {
         budgets.forEach(budget => this.addBudgetRow(
           budgetsList,
           budget.desc,
           budget.cap,
           budget.weekdays !== undefined ? budget.weekdays : weekdaysDefault,
-          budget.spent
+          budget.spent,
+          budget.cpe || '',
+          eventOn  // show CPE wrap immediately if restoring with event toggle on
         ));
       } else {
-        this.addBudgetRow(budgetsList, '', '', weekdaysDefault);
+        this.addBudgetRow(budgetsList, '', '', weekdaysDefault, null, '', false);
       }
-
-      // Event toggle
-      const eventToggle = productBlock.querySelector('.dcc-event-toggle');
-      const eventSection = productBlock.querySelector('.dcc-event-section');
-      const eventToggleRow = productBlock.querySelector('.dcc-toggle-row'); // Event toggle is now the only toggle-row
 
       // If no CPE data, hide the event cap feature entirely
       if (!cpe || cpe === '') {
-        if (eventToggleRow) {
-          eventToggleRow.style.display = 'none';
-        }
+        if (eventToggleRow) eventToggleRow.style.display = 'none';
         eventSection.style.display = 'none';
       } else {
         // Has CPE data - show toggle and set up handlers
@@ -1715,11 +1799,14 @@
           eventToggle.checked = true;
           eventSection.style.display = 'block';
           eventToggle.nextElementSibling.style.background = '#f59e0b';
+          // CPE wraps already shown via showCpe flag in addBudgetRow above
         }
 
         eventToggle.addEventListener('change', () => {
-          eventSection.style.display = eventToggle.checked ? 'block' : 'none';
-          eventToggle.nextElementSibling.style.background = eventToggle.checked ? '#f59e0b' : '';
+          const on = eventToggle.checked;
+          eventSection.style.display = on ? 'block' : 'none';
+          eventToggle.nextElementSibling.style.background = on ? '#f59e0b' : '';
+          setCpeWrapsVisible(on);
           Storage.autoSave();
         });
       }
@@ -1815,8 +1902,9 @@
         // Add budget row
         if (target.classList.contains('dcc-add-brow-btn')) {
           const productBlock = target.closest('.dcc-product-block');
-          const budgetsList = productBlock.querySelector('.dcc-budget-rows-list');
-          UI.addBudgetRow(budgetsList);
+          const budgetsList  = productBlock.querySelector('.dcc-budget-rows-list');
+          const eventOn      = productBlock.querySelector('.dcc-event-toggle')?.checked || false;
+          UI.addBudgetRow(budgetsList, '', '', false, null, '', eventOn);
         }
 
         // Spend mode toggle
