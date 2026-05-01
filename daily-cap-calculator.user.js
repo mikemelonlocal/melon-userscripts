@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Daily Cap Calculator - Melon Local (Enhanced)
 // @namespace    https://thepatch.melonlocal.com/
-// @version      3.5.1
+// @version      3.6.0
 // @description  Paces budgets evenly through end of month. Auto-fills from page data. Refresh + Freeze. Enhanced with auto-save, export/import, keyboard shortcuts, and improved UX.
 // @author       Melon Local
 // @match        https://thepatch.melonlocal.com/*
@@ -23,6 +23,7 @@
     STORAGE_KEY_MINIMIZED: 'dcc-minimized',
     STORAGE_KEY_STATE: 'dcc-state-v3',
     STORAGE_KEY_FROZEN: 'dcc-frozen',
+    STORAGE_KEY_DOCKED: 'dcc-docked',
     INIT_FLAG: 'dcc-initialized',
     AUTO_SAVE_DELAY: 1000,
     INIT_TIMEOUT: 5000,
@@ -713,6 +714,30 @@
       font-family: monospace;
       margin: 0 2px;
     }
+
+    /* ── Sidebar Dock ────────────────────────────────────────────────────── */
+    #daily-cap-calculator.dcc-docked {
+      bottom: 0 !important;
+      right: 0 !important;
+      top: 0 !important;
+      height: 100vh !important;
+      max-height: 100vh !important;
+      border-radius: 0 !important;
+      box-shadow: -4px 0 24px rgba(0,0,0,0.22) !important;
+      transition: none;
+    }
+
+    .dcc-dock-btn.docked {
+      background: rgba(74, 222, 128, 0.22);
+      border-color: rgba(74, 222, 128, 0.65);
+      color: #86efac;
+    }
+
+    /* ── Live Pacing border colors on spend inputs ───────────────────────── */
+    /* These !important rules beat the active-spend / inactive-spend classes  */
+    .dcc-input.dcc-pacing-behind  { border-color: #2563eb !important; background: #eff6ff !important; }
+    .dcc-input.dcc-pacing-on-pace { border-color: #16a34a !important; background: #f0fdf4 !important; }
+    .dcc-input.dcc-pacing-ahead   { border-color: #dc2626 !important; background: #fef2f2 !important; }
   `;
 
   // ============================================================================
@@ -722,6 +747,7 @@
   const State = {
     frozen: false,
     frozenState: null,
+    docked: false,
     productCounter: 0,
     budgetCounter: 0,
     dom: {},
@@ -950,6 +976,31 @@
       if (pct < 90) return { color: '#2563eb', label: 'behind' };
       if (pct > 110) return { color: '#dc2626', label: 'ahead' };
       return { color: '#16a34a', label: 'on pace' };
+    },
+
+    // Instantly colour a spend input's border to reflect current pacing.
+    // Called on every keystroke in the TSA / Remaining fields.
+    applyLivePacingToInput(input, productBlock) {
+      const PACING_CLASSES = ['dcc-pacing-behind', 'dcc-pacing-on-pace', 'dcc-pacing-ahead'];
+      PACING_CLASSES.forEach(c => input.classList.remove(c));
+
+      const dateValue = State.dom.dateInput?.value;
+      if (!dateValue) return;
+
+      const tsa = parseFloat(productBlock.querySelector('.dcc-input-total')?.value);
+      const rem = parseFloat(productBlock.querySelector('.dcc-input-remaining')?.value);
+      // Need both values to compute implied spend
+      if (isNaN(tsa) || tsa <= 0 || isNaN(rem)) return;
+
+      const spent   = Math.max(0, tsa - rem);
+      const elapsed = this.countElapsedDays(dateValue, false);
+      const total   = this.countTotalDaysInMonth(dateValue, false);
+      const pct     = this.computePacing(spent, tsa, elapsed, total);
+
+      if (pct == null) return;
+      if (pct < 90)      input.classList.add('dcc-pacing-behind');
+      else if (pct > 110) input.classList.add('dcc-pacing-ahead');
+      else                input.classList.add('dcc-pacing-on-pace');
     },
 
     validateInput(input) {
@@ -1185,7 +1236,8 @@
             const walker = document.createTreeWalker(section, NodeFilter.SHOW_TEXT, null);
             let node;
             while (node = walker.nextNode()) {
-              if (node.textContent.trim() === 'Remaining Spend:') {
+              // Case-insensitive partial match — handles "Remaining Spend:", "remaining spend", etc.
+              if (/remaining\s*spend/i.test(node.textContent.trim())) {
                 remaining = Utils.parseMoney(
                   node.parentElement?.nextElementSibling?.textContent
                 );
@@ -1277,11 +1329,12 @@
 
                 cells.forEach(td => {
                   const text = td.textContent;
-                  if (text.includes('Spend Available')) {
+                  // Case-insensitive partial matches for resilience against label wording changes
+                  if (/spend\s*available/i.test(text)) {
                     const match = text.match(/\$([0-9,]+\.?[0-9]*)/);
                     if (match) tsa = parseFloat(match[1].replace(/,/g, ''));
                   }
-                  if (text.includes('Remaining Spend')) {
+                  if (/remaining\s*spend/i.test(text)) {
                     const match = text.match(/\$([0-9,]+\.?[0-9]*)/);
                     if (match) remaining = parseFloat(match[1].replace(/,/g, ''));
                   }
@@ -1623,6 +1676,13 @@
 
       productBlock.querySelector('.dcc-product-name').addEventListener('input', () => Storage.autoSave());
 
+      // Live pacing border colors — fire on every keystroke in either spend field
+      const tsaInputEl = productBlock.querySelector('.dcc-input-total');
+      const remInputEl = productBlock.querySelector('.dcc-input-remaining');
+      [tsaInputEl, remInputEl].forEach(el => {
+        if (el) el.addEventListener('input', () => Calculator.applyLivePacingToInput(el, productBlock));
+      });
+
       // Budgets list
       const budgetsList = productBlock.querySelector('.dcc-budget-rows-list');
 
@@ -1694,6 +1754,22 @@
       }
 
       Storage.autoSave();
+    },
+
+    applyDockState() {
+      const calc = State.dom.calculator;
+      const btn  = State.dom.dockBtn;
+      if (State.docked) {
+        calc.classList.add('dcc-docked');
+        document.body.style.marginRight = '460px';
+        btn.classList.add('docked');
+        btn.innerHTML = '&#8701; Undock';
+      } else {
+        calc.classList.remove('dcc-docked');
+        document.body.style.marginRight = '';
+        btn.classList.remove('docked');
+        btn.innerHTML = '&#8700; Dock';
+      }
     },
 
     setMinimized(isMinimized, save = false) {
@@ -1811,6 +1887,14 @@
         }
       });
 
+      // Dock button — toggle sidebar mode
+      State.dom.dockBtn.addEventListener('click', () => {
+        State.docked = !State.docked;
+        UI.applyDockState();
+        localStorage.setItem(CONFIG.STORAGE_KEY_DOCKED, State.docked ? 'true' : 'false');
+        Utils.showToast(State.docked ? 'Docked to sidebar' : 'Undocked');
+      });
+
       // Export button
       State.dom.exportBtn.addEventListener('click', () => {
         Storage.exportConfig();
@@ -1835,6 +1919,12 @@
     setupDateInput() {
       State.dom.dateInput.addEventListener('change', () => {
         Storage.autoSave();
+        // Re-apply live pacing colours across all products when the date shifts
+        document.querySelectorAll('.dcc-product-block').forEach(block => {
+          const mode = block.dataset.spendMode || 'total';
+          const el = block.querySelector(mode === 'total' ? '.dcc-input-total' : '.dcc-input-remaining');
+          if (el) Calculator.applyLivePacingToInput(el, block);
+        });
       });
     },
 
@@ -2115,6 +2205,9 @@
             <button id="calc-freeze-btn" class="dcc-header-btn dcc-freeze-btn" title="Freeze data so Refresh won't overwrite it">
               &#128275; Freeze
             </button>
+            <button id="calc-dock-btn" class="dcc-header-btn dcc-dock-btn" title="Dock calculator to the right sidebar (sets page margin)">
+              &#8700; Dock
+            </button>
             <button id="calc-minimize-btn" class="dcc-header-btn" title="Minimize (⌘/Ctrl+M)" style="padding:2px 6px;">
               &#8722;
             </button>
@@ -2162,6 +2255,7 @@
       minBtn: document.getElementById('calc-minimize-btn'),
       refreshBtn: document.getElementById('calc-refresh-btn'),
       freezeBtn: document.getElementById('calc-freeze-btn'),
+      dockBtn:   document.getElementById('calc-dock-btn'),
       exportBtn: document.getElementById('calc-export-btn'),
       importBtn: document.getElementById('calc-import-btn'),
       addProductBtn: document.getElementById('calc-add-product-btn'),
@@ -2189,6 +2283,12 @@
       State.dom.freezeBtn.classList.add('frozen');
       State.dom.freezeBtn.innerHTML = '&#128274; Frozen';
       Utils.log('Restored frozen state - will not auto-refresh from page');
+    }
+
+    // Restore dock state
+    if (localStorage.getItem(CONFIG.STORAGE_KEY_DOCKED) === 'true') {
+      State.docked = true;
+      UI.applyDockState();
     }
 
     // Determine if we should scrape from page
