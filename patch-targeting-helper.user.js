@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Patch Targeting Helper – Bulk Add + Bulk Remove (Targets) + Bulk Move (BudgetDetails ListBoxes)
 // @namespace    http://tampermonkey.net/
-// @version      3.1.3
-// @description  Bulk Add + Bulk Remove for Edit Advertising Targets (County/City/Zip) + Bulk Move for Kendo ListBoxes on BudgetDetails screens (County, Zip, State, City, DMA).
+// @version      3.2.0
+// @description  Inline bulk Add/Remove for Edit Advertising Targets (County/City/Zip) + Bulk Move for Kendo ListBoxes on BudgetDetails screens. Validation counts, live progress, retried API calls.
 // @match        https://thepatch.melonlocal.com/*
 // @run-at       document-end
 // @grant        none
@@ -18,24 +18,18 @@
   // ============================================================
 
   // Keep in sync with @version in the userscript header above.
-  const VERSION = "patch-targeting-helper-bulk-v3.1.3";
-  const DEBUG = false; // Set to true to enable detailed console logging
+  const VERSION = "patch-targeting-helper-bulk-v3.2.0";
+  const DEBUG = false;
 
-  // Shared mutable state so window.PatchTargetingHelperDebug works before init().
-  const _debug = {
-    DEBUG_MODE: DEBUG,
-  };
+  const _debug = { DEBUG_MODE: DEBUG };
 
-  // Expose a way to toggle debug mode and manually trigger button injection
   window.PatchTargetingHelperDebug = {
     enableDebug: () => { _debug.DEBUG_MODE = true; },
     disableDebug: () => { _debug.DEBUG_MODE = false; },
     injectButtons: () => {
-      ButtonInjector.injectBulkMoveButton_MelonMax();
-      ButtonInjector.injectBulkMoveButtons_AgentsBudgetDetails();
-      ButtonInjector.injectTargetButtons();
-      console.log("[PatchTargetingHelper] Manual button injection triggered");
-    }
+      ButtonInjector.injectAllInlineUI();
+      console.log("[PatchTargetingHelper] Manual UI injection triggered");
+    },
   };
 
   const TIMING = {
@@ -43,6 +37,8 @@
     MAX_WAIT_ITERATIONS: 200,
     WAIT_ITERATION_DELAY_MS: 150,
     FOCUS_DELAY_MS: 0,
+    RETRY_BASE_BACKOFF_MS: 200,
+    RETRY_MAX_ATTEMPTS: 2, // total attempts after the first call = 2 retries
   };
 
   const COLORS = {
@@ -65,190 +61,89 @@
     border: "#edede8",
   };
 
-  const ELEMENT_IDS = {
-    BULK_TEXTAREA: "patchBulkTextarea",
-    BULK_REMOVE_TEXTAREA: "patchBulkRemoveTextarea",
-    BULK_MOVE_TEXTAREA: "patchBulkMoveZipsTextarea",
-    BULK_MOVE_BTN: "patchBulkMoveZipsBtn",
-    BULK_MOVE_BTN_UPDATE1: "patchBulkMoveZipsBtn_update1",
-    BULK_MOVE_BTN_UPDATE2: "patchBulkMoveZipsBtn_update2",
+  const PANEL_IDS = {
+    inlinePanelClass: "patch-inline-panel",
+    inlinePanelStatusClass: "patch-inline-status",
   };
 
   const TARGET_TYPES = {
-    COUNTY: {
-      key: "county",
-      inputId: "newTargetCounty",
-      handlerName: "NewTargetCounty",
-      pretty: "Counties",
-    },
-    CITY: {
-      key: "city",
-      inputId: "newTargetCity",
-      handlerName: "NewTargetCity",
-      pretty: "Cities",
-    },
-    ZIP: {
-      key: "zip",
-      inputId: "newTargetZip",
-      handlerName: "NewTargetZip",
-      pretty: "Zip Codes",
-    },
+    COUNTY: { key: "county", inputId: "newTargetCounty", handlerName: "NewTargetCounty", pretty: "Counties", singular: "County" },
+    CITY:   { key: "city",   inputId: "newTargetCity",   handlerName: "NewTargetCity",   pretty: "Cities",   singular: "City" },
+    ZIP:    { key: "zip",    inputId: "newTargetZip",    handlerName: "NewTargetZip",    pretty: "Zip Codes", singular: "Zip Code" },
   };
 
   // ============================================================
   // UTILITY FUNCTIONS
   // ============================================================
 
-  /**
-   * Sleep utility for async operations
-   * @param {number} ms - Milliseconds to sleep
-   * @returns {Promise<void>}
-   */
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-  /**
-   * Debounce function calls
-   * @param {Function} func - Function to debounce
-   * @param {number} wait - Wait time in ms
-   * @returns {Function}
-   */
   function debounce(func, wait) {
     let timeout;
     return function executedFunction(...args) {
-      const later = () => {
-        clearTimeout(timeout);
-        func(...args);
-      };
       clearTimeout(timeout);
-      timeout = setTimeout(later, wait);
+      timeout = setTimeout(() => func(...args), wait);
     };
   }
 
-  /**
-   * Normalize whitespace in text
-   * @param {string} s - Text to normalize
-   * @returns {string}
-   */
   function normalizeText(s) {
-    return String(s || "").replace(/\s+/g, " ").trim();
+    return String(s || "").replace(/ /g, " ").replace(/\s+/g, " ").trim();
   }
 
-  /**
-   * Parse lines or CSV, removing duplicates (case-insensitive)
-   * @param {string} text - Text to parse
-   * @returns {string[]}
-   */
   function parseLinesOrCsv(text) {
     const raw = String(text || "")
       .split(/[\n,]+/g)
       .map((s) => normalizeText(s))
       .filter(Boolean);
-
     const seen = new Set();
     const out = [];
     for (const v of raw) {
       const k = v.toLowerCase();
-      if (!seen.has(k)) {
-        seen.add(k);
-        out.push(v);
-      }
+      if (!seen.has(k)) { seen.add(k); out.push(v); }
     }
     return out;
   }
 
-  /**
-   * Parse and validate zip codes
-   * @param {string} text - Text containing zip codes
-   * @returns {string[]}
-   */
   function parseZips(text) {
-    // Convert to string and normalize line endings
     const normalized = String(text || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-
-    // Split on whitespace (including newlines) and commas
-    const raw = normalized
-      .split(/[\s,]+/)
-      .map((s) => s.trim())
-      .filter(Boolean);
-
-    // Accept ZIP+4 like "12345-6789" by keeping only the leading 5 digits.
+    const raw = normalized.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
     const cleaned = raw
       .map((z) => z.split("-")[0].replace(/[^\d]/g, ""))
       .filter((z) => /^\d{5}$/.test(z));
-
-    // Deduplicate
     const seen = new Set();
     const out = [];
     for (const z of cleaned) {
-      if (!seen.has(z)) {
-        seen.add(z);
-        out.push(z);
-      }
+      if (!seen.has(z)) { seen.add(z); out.push(z); }
     }
-
-    // Only log errors when parsing fails
-    if (out.length === 0 && text && text.trim()) {
-      logError("parseZips: No valid zips found", {
-        inputLength: text.length,
-        inputSample: text.substring(0, 50),
-        rawTokens: raw.length,
-        cleanedTokens: cleaned.length
-      });
-    }
-
     return out;
   }
 
-  /**
-   * Set native input value and trigger events
-   * @param {HTMLElement} el - Input element
-   * @param {string} value - Value to set
-   */
   function setNativeValue(el, value) {
     try {
       const proto = Object.getPrototypeOf(el);
       const desc = proto ? Object.getOwnPropertyDescriptor(proto, "value") : null;
-      if (desc?.set) {
-        desc.set.call(el, value);
-      } else {
-        el.value = value;
-      }
-
+      if (desc?.set) desc.set.call(el, value);
+      else el.value = value;
       el.dispatchEvent(new Event("input", { bubbles: true }));
       el.dispatchEvent(new Event("change", { bubbles: true }));
     } catch (error) {
-      console.error("[PatchTargetingHelper] Error setting native value:", error);
+      logError("Error setting native value:", error);
       el.value = value;
     }
   }
 
-  /**
-   * Insert element after reference node
-   * @param {Node} newNode - Node to insert
-   * @param {Node} referenceNode - Reference node
-   */
   function insertAfter(newNode, referenceNode) {
     const parent = referenceNode?.parentNode;
     if (!parent) return;
     parent.insertBefore(newNode, referenceNode.nextSibling);
   }
 
-  /**
-   * Log with namespace prefix (only if DEBUG is enabled)
-   * @param {string} message - Message to log
-   * @param {...any} args - Additional arguments
-   */
   function log(message, ...args) {
     if (DEBUG || _debug.DEBUG_MODE) {
       console.log(`[PatchTargetingHelper] ${message}`, ...args);
     }
   }
 
-  /**
-   * Log error with namespace prefix (always logs)
-   * @param {string} message - Error message
-   * @param {...any} args - Additional arguments
-   */
   function logError(message, ...args) {
     console.error(`[PatchTargetingHelper] ${message}`, ...args);
   }
@@ -258,219 +153,200 @@
   // ============================================================
 
   const PageDetector = {
-    hrefLower: String(location.href || "").toLowerCase(),
-    hostLower: String(location.hostname || "").toLowerCase(),
+    get hrefLower() { return String(location.href || "").toLowerCase(); },
+    get hostLower() { return String(location.hostname || "").toLowerCase(); },
 
     get isPatch() {
       return this.hostLower === "thepatch.melonlocal.com";
     },
-
     get isMelonMaxBudgetDetails() {
-      return (
-        this.isPatch &&
-        (this.hrefLower.includes("/melonmax/melonmaxbudgetdetails") ||
-          this.hrefLower.includes("/melonmaxbudgetaddtargetingpartial") ||
-          this.hrefLower.includes("/agents/melonmaxbudgetaddtargetingpartial"))
+      const h = this.hrefLower;
+      return this.isPatch && (
+        h.includes("/melonmax/melonmaxbudgetdetails") ||
+        h.includes("/melonmaxbudgetaddtargetingpartial") ||
+        h.includes("/agents/melonmaxbudgetaddtargetingpartial")
       );
     },
-
     get isAgentsBudgetDetails() {
       return this.isPatch && this.hrefLower.includes("/agents/budgetdetails");
     },
   };
 
   // ============================================================
-  // GLOBAL STYLES
+  // GLOBAL STYLES (inline panel theming)
   // ============================================================
 
   function injectGlobalStyles() {
+    if (document.getElementById("patch-helper-styles")) return;
     const styleTag = document.createElement("style");
+    styleTag.id = "patch-helper-styles";
     styleTag.textContent = `
-      #${ELEMENT_IDS.BULK_TEXTAREA},
-      #${ELEMENT_IDS.BULK_REMOVE_TEXTAREA},
-      #${ELEMENT_IDS.BULK_MOVE_TEXTAREA} {
-        pointer-events: auto !important;
-        z-index: 2147483647 !important;
-        position: relative;
+      .${PANEL_IDS.inlinePanelClass} {
+        margin-top: 12px;
+        padding: 12px 14px;
+        background: ${COLORS.alpine};
+        border: 1px solid ${COLORS.mojave};
+        border-radius: 8px;
+        font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+        color: ${COLORS.coconut};
+        box-shadow: 0 1px 2px rgba(100, 68, 20, 0.08);
       }
+      .${PANEL_IDS.inlinePanelClass}[hidden] { display: none !important; }
+      .${PANEL_IDS.inlinePanelClass}-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 8px;
+      }
+      .${PANEL_IDS.inlinePanelClass}-title {
+        font-size: 14px;
+        font-weight: 600;
+        color: ${COLORS.coconut};
+      }
+      .${PANEL_IDS.inlinePanelClass}-close {
+        background: none; border: none; cursor: pointer;
+        font-size: 20px; line-height: 1; color: ${COLORS.coconut}; padding: 0 6px;
+      }
+      .${PANEL_IDS.inlinePanelClass}-close:hover { color: ${COLORS.cranberry}; }
+      .${PANEL_IDS.inlinePanelClass} textarea {
+        width: 100%; box-sizing: border-box;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 13px; padding: 8px;
+        border: 1px solid ${COLORS.mojave};
+        border-radius: 4px;
+        resize: vertical; min-height: 90px;
+        background: #fff;
+      }
+      .${PANEL_IDS.inlinePanelStatusClass} {
+        margin-top: 6px;
+        font-size: 12px;
+        min-height: 16px;
+        color: ${COLORS.coconut};
+      }
+      .${PANEL_IDS.inlinePanelStatusClass}.is-error { color: ${COLORS.cranberry}; }
+      .${PANEL_IDS.inlinePanelStatusClass}.is-info  { color: ${COLORS.coconut}; }
+      .${PANEL_IDS.inlinePanelStatusClass}.is-warn  { color: ${COLORS.mustardSeed}; }
+      .${PANEL_IDS.inlinePanelStatusClass} .badge {
+        display: inline-block;
+        padding: 1px 6px;
+        border-radius: 10px;
+        background: ${COLORS.sand};
+        color: ${COLORS.coconut};
+        margin-left: 4px;
+        font-weight: 600;
+      }
+      .${PANEL_IDS.inlinePanelClass}-button-row {
+        display: flex; gap: 6px; justify-content: flex-end; margin-top: 10px;
+        flex-wrap: wrap;
+      }
+      .patch-inline-btn {
+        border: none;
+        padding: 7px 14px;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 13px;
+        font-weight: 500;
+        transition: background-color 120ms ease;
+      }
+      .patch-inline-btn[disabled] { cursor: progress; opacity: 0.85; }
+      .patch-inline-btn--primary   { background: ${COLORS.cactus};         color: #fff; }
+      .patch-inline-btn--secondary { background: ${COLORS.sand};           color: ${COLORS.coconut}; }
+      .patch-inline-btn--danger    { background: ${COLORS.watermelonSugar}; color: #fff; }
+      .patch-inline-btn--busy      { background: ${COLORS.mustardSeed} !important; color: #fff !important; }
     `;
     document.head.appendChild(styleTag);
   }
 
   // ============================================================
-  // FOCUS TRAP MITIGATION
+  // API CLIENT — direct calls to the page's backend endpoints
   // ============================================================
+  // Endpoint contract captured from a real chip-close network request:
+  //   POST /Agents/RemoveTarget
+  //   Content-Type: application/json; charset=UTF-8
+  //   RequestVerificationToken: <from hidden input>
+  //   Body: {"AgencyId":"7374","TargetName":"89052","TargetType":"Zip","TargetId":0}
 
-  const FocusManager = {
-    bulkFocusinBlocker: null,
-    dashFocusTrapRestore: null,
-    bulkModalRemovalObserver: null,
+  const ApiClient = {
+    getAntiforgeryToken() {
+      const input = document.querySelector('input[name="__RequestVerificationToken"]');
+      return input?.value || "";
+    },
 
-    /**
-     * Get Bootstrap modal instance from element
-     * @param {HTMLElement} modalEl - Modal element
-     * @returns {object|null}
-     */
-    getBootstrapModalInstance(modalEl) {
-      if (!modalEl) return null;
+    getAgencyId() {
+      // 1. Hidden input (most common in ASP.NET MVC forms)
+      const hidden = document.querySelector(
+        'input[name="AgencyId"], input[name="agencyId"], input[name="agency-id"]'
+      );
+      if (hidden?.value) return String(hidden.value);
 
-      const b = window.bootstrap;
-      if (b?.Modal?.getInstance) {
-        try {
-          return b.Modal.getInstance(modalEl);
-        } catch (error) {
-          logError("Error getting Bootstrap modal instance:", error);
-        }
+      // 2. Globals
+      if (window.AgencyId != null && window.AgencyId !== "") return String(window.AgencyId);
+      if (window.agencyId != null && window.agencyId !== "") return String(window.agencyId);
+
+      // 3. data-* attributes
+      const dataEl = document.querySelector("[data-agency-id]");
+      if (dataEl?.dataset?.agencyId) return String(dataEl.dataset.agencyId);
+
+      // 4. Inline onclicks that pass it
+      const anyOnclick = document.querySelector('[onclick*="AgencyId"], [onclick*="agencyId"]');
+      if (anyOnclick) {
+        const m = anyOnclick.getAttribute("onclick").match(/(?:AgencyId|agencyId)\s*[:=]\s*['"]?(\d+)['"]?/);
+        if (m) return m[1];
       }
 
-      try {
-        const props = Object.getOwnPropertyNames(modalEl);
-        for (const k of props) {
-          const v = modalEl[k];
-          if (
-            v &&
-            typeof v === "object" &&
-            v.constructor &&
-            String(v.constructor.name).toLowerCase().includes("modal")
-          ) {
-            return v;
-          }
-        }
-      } catch (error) {
-        logError("Error finding modal instance via property inspection:", error);
-      }
-
-      return modalEl.__bs_modal || modalEl._bsModal || null;
+      return null;
     },
 
     /**
-     * Try to deactivate dashboard focus trap
-     * @returns {Function|null} - Restore function or null
+     * POST /Agents/RemoveTarget with retry + exponential backoff. Throws if
+     * all attempts fail.
+     * @param {{agencyId:string, name:string, type:string, token:string}} args
+     * @param {{maxRetries?:number, baseBackoffMs?:number}} [opts]
      */
-    tryDeactivateDashboardFocusTrap() {
-      const dashEl = document.getElementById("dashboardModal");
-      if (!dashEl) return null;
-
-      const inst = this.getBootstrapModalInstance(dashEl);
-      if (!inst) return null;
-
-      const ft = inst._focustrap;
-      if (!ft || typeof ft.deactivate !== "function" || typeof ft.activate !== "function") {
-        return null;
-      }
-
-      try {
-        ft.deactivate();
-        return () => {
-          try {
-            ft.activate();
-          } catch (error) {
-            logError("Error reactivating focus trap:", error);
-          }
-        };
-      } catch (error) {
-        logError("Error deactivating focus trap:", error);
-        return null;
-      }
-    },
-
-    /**
-     * Install focusin bypass for bulk modal
-     * @param {HTMLElement} bulkModalEl - Bulk modal element
-     */
-    installFocusinBypassForBulkModal(bulkModalEl) {
-      if (!bulkModalEl || this.bulkFocusinBlocker) return;
-
-      this.bulkFocusinBlocker = function (e) {
-        try {
-          if (bulkModalEl.contains(e.target)) {
-            e.stopImmediatePropagation();
-          }
-        } catch (error) {
-          logError("Error in focusin blocker:", error);
-        }
-      };
-
-      document.addEventListener("focusin", this.bulkFocusinBlocker, true);
-    },
-
-    /**
-     * Uninstall focusin bypass
-     */
-    uninstallFocusinBypass() {
-      if (!this.bulkFocusinBlocker) return;
-      try {
-        document.removeEventListener("focusin", this.bulkFocusinBlocker, true);
-      } catch (error) {
-        logError("Error removing focusin listener:", error);
-      }
-      this.bulkFocusinBlocker = null;
-    },
-
-    /**
-     * Suspend dashboard focus management
-     * @param {HTMLElement} bulkModalEl - Bulk modal element
-     */
-    suspendDashboardFocusManagement(bulkModalEl) {
-      // Fail-safe: avoid stacking focus overrides
-      this.restoreDashboardFocusManagement();
-
-      this.dashFocusTrapRestore = this.tryDeactivateDashboardFocusTrap();
-      this.installFocusinBypassForBulkModal(bulkModalEl);
-
-      // Auto-restore if modal is removed without our close handlers firing
-      try {
-        if (this.bulkModalRemovalObserver) {
-          this.bulkModalRemovalObserver.disconnect();
-        }
-      } catch (error) {
-        logError("Error disconnecting observer:", error);
-      }
-
-      this.bulkModalRemovalObserver = new MutationObserver(() => {
-        try {
-          if (!bulkModalEl || !document.body || !document.body.contains(bulkModalEl)) {
-            this.restoreDashboardFocusManagement();
-          }
-        } catch (error) {
-          logError("Error in mutation observer:", error);
-        }
+    async removeTarget({ agencyId, name, type, token }, opts = {}) {
+      const maxRetries = opts.maxRetries ?? TIMING.RETRY_MAX_ATTEMPTS;
+      const baseBackoff = opts.baseBackoffMs ?? TIMING.RETRY_BASE_BACKOFF_MS;
+      const pretty = type.charAt(0).toUpperCase() + type.slice(1).toLowerCase();
+      const body = JSON.stringify({
+        AgencyId: String(agencyId),
+        TargetName: String(name),
+        TargetType: pretty,
+        TargetId: 0,
       });
 
-      // Observe only the modal's parent — watching document.body with subtree
-      // fires on every descendant mutation in the page.
-      const observeTarget = bulkModalEl?.parentNode || document.body;
-      try {
-        this.bulkModalRemovalObserver.observe(observeTarget, {
-          childList: true,
-        });
-      } catch (error) {
-        logError("Error starting mutation observer:", error);
-      }
-    },
-
-    /**
-     * Restore dashboard focus management
-     */
-    restoreDashboardFocusManagement() {
-      try {
-        if (this.bulkModalRemovalObserver) {
-          this.bulkModalRemovalObserver.disconnect();
-        }
-      } catch (error) {
-        logError("Error disconnecting observer during restore:", error);
-      }
-      this.bulkModalRemovalObserver = null;
-
-      this.uninstallFocusinBypass();
-      if (this.dashFocusTrapRestore) {
+      let lastError;
+      for (let attempt = 0; attempt <= maxRetries; attempt++) {
         try {
-          this.dashFocusTrapRestore();
+          const response = await fetch("/Agents/RemoveTarget", {
+            method: "POST",
+            credentials: "same-origin",
+            headers: {
+              "Content-Type": "application/json; charset=UTF-8",
+              "X-Requested-With": "XMLHttpRequest",
+              RequestVerificationToken: token,
+            },
+            body,
+          });
+          if (!response.ok) {
+            // Treat 5xx and 429 as retryable; 4xx (other) as terminal.
+            if (response.status >= 500 || response.status === 429) {
+              throw new Error(`HTTP ${response.status} ${response.statusText}`);
+            }
+            throw Object.assign(
+              new Error(`HTTP ${response.status} ${response.statusText}`),
+              { terminal: true }
+            );
+          }
+          return; // success
         } catch (error) {
-          logError("Error restoring focus trap:", error);
+          lastError = error;
+          if (error?.terminal || attempt === maxRetries) break;
+          const backoff = baseBackoff * Math.pow(2, attempt);
+          log(`removeTarget retry ${attempt + 1}/${maxRetries} for "${name}" after ${backoff}ms`, error?.message);
+          await sleep(backoff);
         }
-        this.dashFocusTrapRestore = null;
       }
+      throw lastError ?? new Error("Unknown error in removeTarget");
     },
   };
 
@@ -479,90 +355,60 @@
   // ============================================================
 
   const BulkAddOperations = {
+    getTargetTypeConfig(typeKey) {
+      return ({ county: TARGET_TYPES.COUNTY, city: TARGET_TYPES.CITY, zip: TARGET_TYPES.ZIP })[typeKey] || null;
+    },
+
     /**
-     * Run bulk add operation
-     * @param {string} typeKey - Type of target (county, city, zip)
-     * @param {string} rawText - Raw text input
-     * @param {number} delayMs - Delay between operations
-     * @returns {Promise<void>}
+     * Parse + dedup planning. Pure function — no side effects on DOM.
+     * @param {string} typeKey
+     * @param {string} rawText
+     * @returns {{values:string[], toAdd:string[], skipped:string[], existingSize:number}}
      */
-    async run(typeKey, rawText, delayMs = TIMING.DEFAULT_DELAY_MS) {
-      const targetType = this.getTargetTypeConfig(typeKey);
-      if (!targetType) {
-        throw new Error(`Unknown target type: ${typeKey}`);
-      }
-
-      const { inputId, handlerName, pretty } = targetType;
-
-      const input = document.getElementById(inputId);
-      const handler = window[handlerName];
-
-      if (!input || typeof handler !== "function") {
-        throw new Error(`Cannot find input or handler for ${pretty}`);
-      }
-
-      log(`Bulk add started for ${typeKey}`, {
-        rawTextLength: rawText?.length,
-        rawTextSample: rawText?.substring(0, 100),
-        typeKey
-      });
-
+    plan(typeKey, rawText) {
       const values = typeKey === "zip" ? parseZips(rawText) : parseLinesOrCsv(rawText);
-
-      log(`Parsed values:`, {
-        count: values.length,
-        sample: values.slice(0, 5)
-      });
-
-      if (!values.length) {
-        const msg = `No valid ${pretty} found in the input.`;
-        alert(DEBUG
-          ? `${msg}\n\nDebug: Input had ${rawText?.length || 0} chars.\nSample: "${rawText?.substring(0, 50)}"\n\nCheck console for details.`
-          : msg
-        );
-        logError(`No valid items parsed for ${typeKey}`, {
-          rawTextLength: rawText?.length,
-          rawTextType: typeof rawText,
-          isEmpty: !rawText || !rawText.trim()
-        });
-        return;
-      }
-
-      // Skip values that are already present as targets of this type.
-      const { existing, typeDetectionWorks } =
-        BulkRemoveOperations.getExistingTargetNames(typeKey);
-
+      const { existing } = BulkRemoveOperations.getExistingTargetNames(typeKey);
+      const seenInBatch = new Set();
       const toAdd = [];
       const skipped = [];
       for (const val of values) {
         const key = normalizeText(val).toLowerCase();
-        if (existing.has(key)) {
+        if (existing.has(key) || seenInBatch.has(key)) {
           skipped.push(val);
         } else {
+          seenInBatch.add(key);
           toAdd.push(val);
-          // Track within this batch so duplicates pasted twice only add once.
-          existing.add(key);
         }
       }
+      return { values, toAdd, skipped, existingSize: existing.size };
+    },
 
-      log(`Dedup summary`, {
-        typeKey,
-        existingCount: existing.size,
-        inputCount: values.length,
-        toAddCount: toAdd.length,
-        skippedCount: skipped.length,
-        typeDetectionWorks,
-      });
+    /**
+     * Execute the bulk add. opts.onProgress({completed,total,phase}) is
+     * invoked after each item.
+     */
+    async run(typeKey, rawText, delayMs = TIMING.DEFAULT_DELAY_MS, opts = {}) {
+      const targetType = this.getTargetTypeConfig(typeKey);
+      if (!targetType) throw new Error(`Unknown target type: ${typeKey}`);
+      const { inputId, handlerName, pretty } = targetType;
 
+      const input = document.getElementById(inputId);
+      const handler = window[handlerName];
+      if (!input || typeof handler !== "function") {
+        throw new Error(`Cannot find input or handler for ${pretty}`);
+      }
+
+      const { toAdd, skipped, values } = this.plan(typeKey, rawText);
+      log(`Bulk add plan`, { typeKey, total: values.length, toAdd: toAdd.length, skipped: skipped.length });
+
+      if (!values.length) {
+        return { ok: false, reason: "empty", message: `No valid ${pretty} found in the input.` };
+      }
       if (!toAdd.length) {
-        alert(
-          `All ${values.length} ${pretty} are already targeted. Nothing to add.`
-        );
-        return;
+        return { ok: true, completed: 0, total: 0, skipped: skipped.length, message: `All ${values.length} ${pretty} are already targeted. Nothing to add.` };
       }
 
       let completed = 0;
-
       for (let i = 0; i < toAdd.length; i++) {
         const val = toAdd[i];
         try {
@@ -575,126 +421,17 @@
         } catch (error) {
           logError(`Error adding ${val}:`, error);
         }
+        if (opts.onProgress) opts.onProgress({ completed, total: toAdd.length, phase: "Adding" });
       }
 
-      const skipNote = skipped.length
-        ? `\nSkipped (already targeted): ${skipped.length}`
-        : "";
-      const detectNote = !typeDetectionWorks && skipped.length
-        ? `\n\nNote: row type could not be detected, so dedup matched against ALL rows in the table regardless of type.`
-        : "";
-      const msg =
-        `Bulk Add Complete.\nProcessed: ${completed} of ${toAdd.length} ${pretty}` +
-        skipNote +
-        detectNote;
-      alert(msg);
-      log(msg);
-    },
-
-    /**
-     * Get target type configuration
-     * @param {string} typeKey - Type key
-     * @returns {object|null}
-     */
-    getTargetTypeConfig(typeKey) {
-      const typeMap = {
-        county: TARGET_TYPES.COUNTY,
-        city: TARGET_TYPES.CITY,
-        zip: TARGET_TYPES.ZIP,
+      return {
+        ok: true,
+        completed,
+        total: toAdd.length,
+        skipped: skipped.length,
+        message: `Added ${completed} of ${toAdd.length} ${pretty}` +
+          (skipped.length ? `  •  Skipped ${skipped.length} duplicate(s)` : ""),
       };
-      return typeMap[typeKey] || null;
-    },
-  };
-
-  // ============================================================
-  // BULK REMOVE OPERATIONS
-  // ============================================================
-
-  // ============================================================
-  // API CLIENT — direct calls to the page's backend endpoints
-  // ============================================================
-  // The chip UI doesn't expose DOM-level delete handlers, so Remove ALL
-  // calls POST /Agents/RemoveTarget directly. Endpoint contract was captured
-  // from a real chip-close network request:
-  //   POST /Agents/RemoveTarget
-  //   Content-Type: application/json; charset=UTF-8
-  //   RequestVerificationToken: <from hidden input>
-  //   Body: {"AgencyId":"7374","TargetName":"89052","TargetType":"Zip","TargetId":0}
-
-  const ApiClient = {
-    /**
-     * Read the ASP.NET anti-forgery token from the page.
-     * @returns {string}
-     */
-    getAntiforgeryToken() {
-      const input = document.querySelector('input[name="__RequestVerificationToken"]');
-      return input?.value || "";
-    },
-
-    /**
-     * Try to locate the AgencyId from the page. The chip UI is inside an
-     * AJAX-loaded modal, so we probe multiple likely sources.
-     * @returns {string|null}
-     */
-    getAgencyId() {
-      // 1. Hidden input (most common in ASP.NET MVC forms)
-      const hidden = document.querySelector(
-        'input[name="AgencyId"], input[name="agencyId"], input[name="agency-id"]'
-      );
-      if (hidden?.value) return String(hidden.value);
-
-      // 2. Global variables set on the page
-      if (typeof window.AgencyId !== "undefined" && window.AgencyId) {
-        return String(window.AgencyId);
-      }
-      if (typeof window.agencyId !== "undefined" && window.agencyId) {
-        return String(window.agencyId);
-      }
-
-      // 3. data-agency-id attribute on any element
-      const dataEl = document.querySelector("[data-agency-id]");
-      if (dataEl?.dataset?.agencyId) return String(dataEl.dataset.agencyId);
-
-      // 4. Scan existing onclick attributes on the page for a call that
-      //    includes the agency id as a literal argument
-      const anyOnclick = document.querySelector(
-        '[onclick*="AgencyId"], [onclick*="agencyId"]'
-      );
-      if (anyOnclick) {
-        const m = anyOnclick
-          .getAttribute("onclick")
-          .match(/(?:AgencyId|agencyId)\s*[:=]\s*['"]?(\d+)['"]?/);
-        if (m) return m[1];
-      }
-
-      return null;
-    },
-
-    /**
-     * POST /Agents/RemoveTarget with the given target. Throws on HTTP failure.
-     * @param {{agencyId:string, name:string, type:string, token:string}} args
-     * @returns {Promise<void>}
-     */
-    async removeTarget({ agencyId, name, type, token }) {
-      const pretty = type.charAt(0).toUpperCase() + type.slice(1).toLowerCase();
-      const response = await fetch("/Agents/RemoveTarget", {
-        method: "POST",
-        credentials: "same-origin",
-        headers: {
-          "Content-Type": "application/json; charset=UTF-8",
-          "X-Requested-With": "XMLHttpRequest",
-          RequestVerificationToken: token,
-        },
-        body: JSON.stringify({
-          AgencyId: String(agencyId),
-          TargetName: String(name),
-          TargetType: pretty,
-          TargetId: 0,
-        }),
-      });
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status} ${response.statusText}`);
-      }
     },
   };
 
@@ -704,26 +441,19 @@
 
   const BulkRemoveOperations = {
     /**
-     * Collect existing target names for dedup. Tries the legacy
-     * #exampleTable first, then falls back to scanning chips in the modern
-     * chip UI. Returns lowercased names so callers can dedup directly.
-     * @param {string} typeKey - Target type
-     * @returns {{existing: Set<string>, typeDetectionWorks: boolean}}
+     * Existing target names for dedup. Tries the legacy table; falls back
+     * to the chip UI scanner.
      */
     getExistingTargetNames(typeKey) {
       const existing = new Set();
 
-      // Path A: legacy table
-      const rows = Array.from(
-        document.querySelectorAll("#exampleTable tbody tr")
-      );
+      const rows = Array.from(document.querySelectorAll("#exampleTable tbody tr"));
       for (const row of rows) {
         const cols = row.querySelectorAll("td");
         if (cols.length < 2) continue;
         existing.add(normalizeText(cols[1].textContent).toLowerCase());
       }
 
-      // Path B: chip UI fallback — only if the table yielded nothing
       if (existing.size === 0) {
         for (const name of this.collectChipTargetNames(typeKey)) {
           existing.add(name.toLowerCase());
@@ -735,47 +465,28 @@
 
     /**
      * Walk up from the type's Add input to find the section container, then
-     * scan for chip-like elements. Used by both dedup (BulkAdd) and
-     * Remove ALL for chip-based UIs.
-     *
-     * The detector tries three strategies, most specific first:
-     *   1. Elements with class matching chip/pill/tag/badge/token.
-     *   2. Elements that visibly contain a close-icon (×, ⊗, button, svg,
-     *      class="close|remove|delete") — catches chip structures whose
-     *      class we can't predict.
-     *   3. For zip specifically, a last-resort document-wide scan for leaf
-     *      elements whose textContent is a 5-digit number.
-     * @param {string} typeKey - Target type
-     * @returns {string[]} - Unique chip target names (normalized)
+     * scan for chip-like elements. Three strategies, most specific first.
      */
     collectChipTargetNames(typeKey) {
       const cap = typeKey.charAt(0).toUpperCase() + typeKey.slice(1);
-      const addBtn = document.querySelector(
-        `button[onclick="NewTarget${cap}()"]`
-      );
+      const addBtn = document.querySelector(`button[onclick="NewTarget${cap}()"]`);
       const input = document.getElementById(`newTarget${cap}`);
       const anchor = addBtn || input;
       if (!anchor) return [];
 
-      // Regex for common close-icon characters. Using a character class
-      // since some environments render these as surrogate pairs.
-      const CLOSE_ICONS = /[\u00D7\u2715\u2716\u2717\u2718\u2A2F\u229D\u229C×⊗✕✖✗✘]/g;
-
+      const CLOSE_ICONS = /[×✕✖✗✘⨯⊝⊜×⊗✕✖✗✘]/g;
       const seen = new Set();
       const names = [];
 
       const cleanText = (raw) =>
-        normalizeText(
-          String(raw || "")
-            .replace(CLOSE_ICONS, "")
-            .replace(/\u00A0/g, " ")
-        );
+        normalizeText(String(raw || "").replace(CLOSE_ICONS, ""));
+
+      const HEADING_NOISE = /^(target counties|target cities|target zips|target states|licensed states|add|bulk add|bulk remove|cancel|remove all|target county|target city|target zip)$/i;
 
       const add = (raw) => {
         const n = cleanText(raw);
         if (!n || n.length > 100) return;
-        // Filter out UI chrome labels that could slip through
-        if (/^(target counties|target cities|target zips|target states|licensed states|add|bulk add|bulk remove|cancel|remove all)$/i.test(n)) return;
+        if (HEADING_NOISE.test(n)) return;
         if (typeKey === "zip" && !/^\d{5}$/.test(n)) return;
         const k = n.toLowerCase();
         if (seen.has(k)) return;
@@ -783,8 +494,6 @@
         names.push(n);
       };
 
-      // Walk up the anchor's ancestors looking for a container that
-      // contains chip-like elements.
       let container = anchor.parentElement;
       for (let depth = 0; depth < 8 && container; depth++, container = container.parentElement) {
         // Strategy 1: explicit chip classes
@@ -797,9 +506,7 @@
         }
         if (names.length) return names;
 
-        // Strategy 2: any element (span/div/li/button/a) that contains a
-        // close-icon or close-button and has short text content. Requires
-        // >=2 matches so we don't mis-identify a lone "×" somewhere.
+        // Strategy 2: short-text wrappers containing a close icon/button.
         const candidates = container.querySelectorAll("span, div, li, button, a");
         const matches = [];
         for (const c of candidates) {
@@ -809,11 +516,10 @@
               "[class*='close'], [class*='remove'], [class*='delete'], svg"
           );
           const hasIcon = CLOSE_ICONS.test(c.textContent || "");
-          CLOSE_ICONS.lastIndex = 0; // reset global regex state
+          CLOSE_ICONS.lastIndex = 0;
           if (!closeEl && !hasIcon) continue;
           const text = cleanText(c.textContent);
           if (!text) continue;
-          // Avoid nested matches (parent already counted)
           if (matches.some((m) => m.el.contains(c))) continue;
           matches.push({ el: c, text });
         }
@@ -823,12 +529,9 @@
         }
       }
 
-      // Strategy 3: last-resort zip scan
+      // Strategy 3: zip-only doc-wide 5-digit leaf scan
       if (typeKey === "zip") {
-        const walker = document.createTreeWalker(
-          document.body,
-          NodeFilter.SHOW_ELEMENT
-        );
+        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
         while (walker.nextNode()) {
           const el = walker.currentNode;
           if (el.children.length !== 0) continue;
@@ -841,55 +544,39 @@
     },
 
     /**
-     * Run bulk remove — paste-based. Restored to the original v3.0.0 logic
-     * (no type filtering) because my earlier type-scoping change filtered
-     * out rows when the delete-link onclick didn't match my regex.
-     * @param {string} typeKey - Type of target
-     * @param {string} rawText - Raw text input
-     * @param {number} delayMs - Delay between operations
-     * @returns {Promise<void>}
+     * Bulk Remove (paste-based). Same v3.0.0 logic for the legacy table
+     * path; if it finds no rows, falls back to the AJAX endpoint with
+     * progress callbacks.
      */
-    async run(typeKey, rawText, delayMs = TIMING.DEFAULT_DELAY_MS) {
+    async run(typeKey, rawText, delayMs = TIMING.DEFAULT_DELAY_MS, opts = {}) {
       const targetType = BulkAddOperations.getTargetTypeConfig(typeKey);
-      if (!targetType) {
-        throw new Error(`Unknown target type: ${typeKey}`);
-      }
-
+      if (!targetType) throw new Error(`Unknown target type: ${typeKey}`);
       const { pretty } = targetType;
 
-      log(`Bulk remove started for ${typeKey}`, {
-        rawTextLength: rawText?.length,
-        rawTextSample: rawText?.substring(0, 100),
-      });
-
       const values = typeKey === "zip" ? parseZips(rawText) : parseLinesOrCsv(rawText);
-
       if (!values.length) {
-        alert(`No valid ${pretty} found in the input.`);
-        return;
+        return { ok: false, reason: "empty", message: `No valid ${pretty} found in the input.` };
       }
 
       const normalizedValues = values.map((v) => normalizeText(v).toLowerCase());
-
-      const rows = Array.from(
-        document.querySelectorAll("#exampleTable tbody tr")
-      );
+      const rows = Array.from(document.querySelectorAll("#exampleTable tbody tr"));
       let removed = 0;
 
+      // Path A: legacy DOM table
+      let domAttempted = 0;
       for (const row of rows) {
         try {
           const cols = row.querySelectorAll("td");
           if (cols.length < 2) continue;
-
           const cellText = normalizeText(cols[1].textContent).toLowerCase();
           if (normalizedValues.includes(cellText)) {
-            const deleteLink = row.querySelector(
-              'a[onclick*="DeleteAdvertisingTarget"]'
-            );
-            if (deleteLink) {
-              deleteLink.click();
+            const link = row.querySelector('a[onclick*="DeleteAdvertisingTarget"]');
+            if (link) {
+              link.click();
               await sleep(delayMs);
               removed++;
+              domAttempted++;
+              if (opts.onProgress) opts.onProgress({ completed: removed, total: values.length, phase: "Removing" });
             }
           }
         } catch (error) {
@@ -897,81 +584,38 @@
         }
       }
 
-      // If DOM-based removal found nothing, fall back to the AJAX endpoint
-      // (used by the newer chip UI, which has no delete links in the DOM).
-      if (removed === 0) {
-        const apiResult = await this._removeViaApi(typeKey, values, delayMs);
-        if (apiResult) {
-          alert(
-            `Bulk Remove Complete (via API).\nRemoved: ${apiResult.removed} of ${values.length} ${pretty}` +
-              (apiResult.failed.length
-                ? `\nFailed: ${apiResult.failed.join(", ")}`
-                : "")
-          );
-          if (apiResult.removed > 0) {
-            setTimeout(() => location.reload(), 400);
-          }
-          return;
-        }
+      if (removed > 0) {
+        return { ok: true, completed: removed, total: values.length, message: `Removed ${removed} ${pretty}` };
       }
 
-      alert(`Bulk Remove Complete.\nRemoved: ${removed} ${pretty}`);
+      // Path B: AJAX
+      const apiResult = await this._removeViaApi(typeKey, values, delayMs, opts);
+      if (!apiResult) {
+        return { ok: false, reason: "no-api", message: `Cannot remove via API: missing anti-forgery token or AgencyId.` };
+      }
+      return {
+        ok: true,
+        completed: apiResult.removed,
+        total: values.length,
+        failed: apiResult.failed,
+        reload: apiResult.removed > 0,
+        message: `Removed ${apiResult.removed} of ${values.length} ${pretty}` +
+          (apiResult.failed.length ? `  •  Failed: ${apiResult.failed.length}` : ""),
+      };
     },
 
     /**
-     * Shared AJAX-based removal used by both run() (as a fallback) and
-     * removeAll(). Returns null if the API is unavailable (no token/agency).
-     * @param {string} typeKey
-     * @param {string[]} names
-     * @param {number} delayMs
-     * @returns {Promise<{removed:number, failed:string[]}|null>}
+     * Remove every target of the given type. DOM-first, API-fallback.
      */
-    async _removeViaApi(typeKey, names, delayMs) {
-      const token = ApiClient.getAntiforgeryToken();
-      const agencyId = ApiClient.getAgencyId();
-      if (!token || !agencyId) {
-        logError("API remove unavailable", {
-          hasToken: !!token,
-          hasAgencyId: !!agencyId,
-        });
-        return null;
-      }
-      let removed = 0;
-      const failed = [];
-      for (const name of names) {
-        try {
-          await ApiClient.removeTarget({ agencyId, name, type: typeKey, token });
-          removed++;
-          await sleep(delayMs);
-        } catch (error) {
-          logError(`API remove failed for ${name}:`, error);
-          failed.push(name);
-        }
-      }
-      return { removed, failed };
-    },
-
-    /**
-     * Remove every target of the given type. Tries DOM-based delete first
-     * (legacy table UI), then falls back to the AJAX endpoint (chip UI).
-     * @param {string} typeKey - Target type
-     * @param {number} delayMs - Delay between operations
-     * @returns {Promise<void>}
-     */
-    async removeAll(typeKey, delayMs = TIMING.DEFAULT_DELAY_MS) {
+    async removeAll(typeKey, delayMs = TIMING.DEFAULT_DELAY_MS, opts = {}) {
       const targetType = BulkAddOperations.getTargetTypeConfig(typeKey);
-      if (!targetType) {
-        throw new Error(`Unknown target type: ${typeKey}`);
-      }
+      if (!targetType) throw new Error(`Unknown target type: ${typeKey}`);
       const { pretty } = targetType;
 
       // Path A: legacy DOM table
-      const domRows = Array.from(
-        document.querySelectorAll("#exampleTable tbody tr")
-      ).filter((r) => r.querySelector('a[onclick*="DeleteAdvertisingTarget"]'));
-
+      const domRows = Array.from(document.querySelectorAll("#exampleTable tbody tr"))
+        .filter((r) => r.querySelector('a[onclick*="DeleteAdvertisingTarget"]'));
       if (domRows.length) {
-        if (!confirm(`Remove ALL ${domRows.length} row(s) in the targets table? This cannot be undone.`)) return;
         let removed = 0;
         for (const row of domRows) {
           try {
@@ -979,62 +623,56 @@
             link.click();
             await sleep(delayMs);
             removed++;
+            if (opts.onProgress) opts.onProgress({ completed: removed, total: domRows.length, phase: "Removing" });
           } catch (error) {
             logError("Error in removeAll (DOM path):", error);
           }
         }
-        alert(`Remove All Complete.\nRemoved: ${removed} of ${domRows.length} row(s)`);
-        return;
+        return { ok: true, completed: removed, total: domRows.length, message: `Removed ${removed} of ${domRows.length} row(s)` };
       }
 
-      // Path B: chip UI via AJAX
+      // Path B: chip + AJAX
       const names = this.collectChipTargetNames(typeKey);
       if (!names.length) {
-        alert(
-          `No ${pretty} found to remove. Make sure the Edit Advertising Targets modal is open with at least one ${pretty.toLowerCase().replace(/s$/, "")} chip visible.`
-        );
-        return;
+        return { ok: false, reason: "empty", message: `No ${pretty} found to remove.` };
       }
+      const apiResult = await this._removeViaApi(typeKey, names, delayMs, opts);
+      if (!apiResult) {
+        return { ok: false, reason: "no-api", message: `Cannot remove via API: missing anti-forgery token or AgencyId.` };
+      }
+      return {
+        ok: true,
+        completed: apiResult.removed,
+        total: names.length,
+        failed: apiResult.failed,
+        reload: apiResult.removed > 0,
+        message: `Removed ${apiResult.removed} of ${names.length} ${pretty}` +
+          (apiResult.failed.length ? `  •  Failed: ${apiResult.failed.length}` : ""),
+      };
+    },
 
+    async _removeViaApi(typeKey, names, delayMs, opts = {}) {
       const token = ApiClient.getAntiforgeryToken();
       const agencyId = ApiClient.getAgencyId();
       if (!token || !agencyId) {
-        alert(
-          `Cannot remove via API: missing ${!token ? "anti-forgery token" : "agency ID"}.\n\n` +
-            `This page may have changed. Please report this so the script can be updated.`
-        );
-        logError("Remove All aborted: missing auth", {
-          hasToken: !!token,
-          hasAgencyId: !!agencyId,
-        });
-        return;
+        logError("API remove unavailable", { hasToken: !!token, hasAgencyId: !!agencyId });
+        return null;
       }
-
-      if (
-        !confirm(
-          `Remove ALL ${names.length} ${pretty} via API?\n\n` +
-            `(The page will reload after removal to refresh the chip list.)\n\n` +
-            `This cannot be undone.`
-        )
-      ) {
-        return;
+      let removed = 0;
+      const failed = [];
+      for (let i = 0; i < names.length; i++) {
+        const name = names[i];
+        try {
+          await ApiClient.removeTarget({ agencyId, name, type: typeKey, token });
+          removed++;
+          await sleep(delayMs);
+        } catch (error) {
+          logError(`API remove failed for ${name}:`, error?.message || error);
+          failed.push(name);
+        }
+        if (opts.onProgress) opts.onProgress({ completed: i + 1, total: names.length, phase: "Removing" });
       }
-
-      const apiResult = await this._removeViaApi(typeKey, names, delayMs);
-      if (!apiResult) {
-        alert("Remove All failed: API unavailable.");
-        return;
-      }
-
-      const failNote = apiResult.failed.length
-        ? `\nFailed: ${apiResult.failed.slice(0, 5).join(", ")}${apiResult.failed.length > 5 ? "…" : ""}`
-        : "";
-      alert(
-        `Remove All Complete.\nRemoved: ${apiResult.removed} of ${names.length} ${pretty}${failNote}\n\nReloading page…`
-      );
-      if (apiResult.removed > 0) {
-        setTimeout(() => location.reload(), 400);
-      }
+      return { removed, failed };
     },
   };
 
@@ -1043,23 +681,14 @@
   // ============================================================
 
   const BulkMoveOperations = {
-    /**
-     * Find Kendo ListBox pair by select IDs
-     * @param {string} sourceSelectId - Source select ID
-     * @param {string} destSelectId - Destination select ID
-     * @returns {object|null}
-     */
     getListBoxPairBySelectIds(sourceSelectId, destSelectId) {
       try {
         const sel1 = document.getElementById(sourceSelectId);
         const sel2 = document.getElementById(destSelectId);
         if (!sel1 || !sel2) return null;
-
         const available = window.jQuery?.(sel1).data("kendoListBox");
         const useThese = window.jQuery?.(sel2).data("kendoListBox");
-
         if (!available || !useThese) return null;
-
         return { available, useThese };
       } catch (error) {
         logError("Error getting ListBox pair:", error);
@@ -1067,95 +696,34 @@
       }
     },
 
-    /**
-     * Get text from ListBox item respecting dataTextField configuration
-     * @param {object} item - ListBox item
-     * @param {object} listBox - Kendo ListBox instance
-     * @returns {string}
-     */
-    getItemText(item, listBox) {
+    getItemText(item, lb) {
       if (!item) return "";
-
-      // Try to get the configured dataTextField
-      let dataTextField = null;
-      try {
-        if (listBox?.options?.dataTextField) {
-          dataTextField = listBox.options.dataTextField;
-        }
-      } catch (error) {
-        logError("Error getting dataTextField:", error);
+      const f = lb?.options?.dataTextField;
+      if (f && item[f] != null) return String(item[f]);
+      for (const k of ["County", "Zip", "State", "City", "DMA", "text", "Text", "TargetName", "value", "Value"]) {
+        if (item[k] != null) return String(item[k]);
       }
-
-      // If dataTextField is configured and exists on item, use it
-      if (dataTextField && item[dataTextField] != null) {
-        return String(item[dataTextField]);
-      }
-
-      // Fallback: check common property names
-      if (item.County != null) return String(item.County);
-      if (item.Zip != null) return String(item.Zip);
-      if (item.State != null) return String(item.State);
-      if (item.City != null) return String(item.City);
-      if (item.DMA != null) return String(item.DMA);
-      if (item.text != null) return String(item.text);
-      if (item.Text != null) return String(item.Text);
-      if (item.TargetName != null) return String(item.TargetName);
-      if (item.value != null) return String(item.value);
-      if (item.Value != null) return String(item.Value);
-
       return "";
     },
 
-    /**
-     * Get value from ListBox item respecting dataValueField configuration
-     * @param {object} item - ListBox item
-     * @param {object} listBox - Kendo ListBox instance
-     * @returns {string}
-     */
-    getItemValue(item, listBox) {
+    getItemValue(item, lb) {
       if (!item) return "";
-
-      // Try to get the configured dataValueField
-      let dataValueField = null;
-      try {
-        if (listBox?.options?.dataValueField) {
-          dataValueField = listBox.options.dataValueField;
-        }
-      } catch (error) {
-        logError("Error getting dataValueField:", error);
+      const f = lb?.options?.dataValueField;
+      if (f && item[f] != null) return String(item[f]);
+      for (const k of ["value", "Value", "Zip", "County", "State", "City", "DMA"]) {
+        if (item[k] != null) return String(item[k]);
       }
-
-      // If dataValueField is configured and exists on item, use it
-      if (dataValueField && item[dataValueField] != null) {
-        return String(item[dataValueField]);
-      }
-
-      // Fallback: check common property names
-      if (item.value != null) return String(item.value);
-      if (item.Value != null) return String(item.Value);
-      if (item.Zip != null) return String(item.Zip);
-      if (item.County != null) return String(item.County);
-      if (item.State != null) return String(item.State);
-      if (item.City != null) return String(item.City);
-      if (item.DMA != null) return String(item.DMA);
-
       return "";
     },
 
-    /**
-     * Get items as array with text and value
-     * @param {object} lb - Kendo ListBox
-     * @returns {Array}
-     */
     getItemsArray(lb) {
       try {
         const ds = lb.dataSource;
         if (!ds?.data) return [];
-        const data = ds.data();
-        return data.map((item) => ({
+        return ds.data().map((item) => ({
           text: normalizeText(this.getItemText(item, lb)),
           value: this.getItemValue(item, lb),
-          raw: item, // Keep the original item
+          raw: item,
         }));
       } catch (error) {
         logError("Error getting items array:", error);
@@ -1163,40 +731,25 @@
       }
     },
 
-    /**
-     * Move items by text from source to destination
-     * @param {object} sourceLb - Source ListBox
-     * @param {object} destLb - Destination ListBox
-     * @param {string[]} textArray - Array of text values to move
-     * @returns {number} Number of items moved
-     */
-    moveItemsByText(sourceLb, destLb, textArray) {
+    moveItemsByText(sourceLb, destLb, textArray, opts = {}) {
       try {
-        const normalized = textArray.map((t) => normalizeText(t).toLowerCase());
+        const wanted = textArray.map((t) => normalizeText(t).toLowerCase());
         const sourceItems = this.getItemsArray(sourceLb);
-        const toMove = sourceItems.filter((item) =>
-          normalized.includes(item.text.toLowerCase())
-        );
-
+        const toMove = sourceItems.filter((item) => wanted.includes(item.text.toLowerCase()));
         if (!toMove.length) return 0;
-
         const sourceDs = sourceLb.dataSource;
         const destDs = destLb.dataSource;
-
-        for (const item of toMove) {
+        for (let i = 0; i < toMove.length; i++) {
+          const item = toMove[i];
           try {
-            // Add the raw item (preserves all properties)
             destDs.add(item.raw);
-            // Find and remove from source
-            const found = sourceDs.data().find((d) =>
-              this.getItemValue(d, sourceLb) === item.value
-            );
+            const found = sourceDs.data().find((d) => this.getItemValue(d, sourceLb) === item.value);
             if (found) sourceDs.remove(found);
           } catch (error) {
             logError("Error moving item:", item.text, error);
           }
+          if (opts.onProgress) opts.onProgress({ completed: i + 1, total: toMove.length, phase: "Moving" });
         }
-
         return toMove.length;
       } catch (error) {
         logError("Error in moveItemsByText:", error);
@@ -1204,38 +757,26 @@
       }
     },
 
-    /**
-     * Move all items from source to destination
-     * @param {object} sourceLb - Source ListBox
-     * @param {object} destLb - Destination ListBox
-     * @returns {number} Number of items moved
-     */
-    moveAll(sourceLb, destLb) {
+    moveAll(sourceLb, destLb, opts = {}) {
       try {
         const sourceItems = this.getItemsArray(sourceLb);
         if (!sourceItems.length) return 0;
-
         const sourceDs = sourceLb.dataSource;
         const destDs = destLb.dataSource;
-
-        for (const item of sourceItems) {
+        for (let i = 0; i < sourceItems.length; i++) {
           try {
-            // Add the raw item (preserves all properties)
-            destDs.add(item.raw);
+            destDs.add(sourceItems[i].raw);
           } catch (error) {
-            logError("Error adding item to destination:", item.text, error);
+            logError("Error adding item to destination:", sourceItems[i].text, error);
           }
+          if (opts.onProgress) opts.onProgress({ completed: i + 1, total: sourceItems.length, phase: "Moving" });
         }
-
         try {
           const allData = sourceDs.data().slice();
-          for (const d of allData) {
-            sourceDs.remove(d);
-          }
+          for (const d of allData) sourceDs.remove(d);
         } catch (error) {
           logError("Error removing items from source:", error);
         }
-
         return sourceItems.length;
       } catch (error) {
         logError("Error in moveAll:", error);
@@ -1243,446 +784,406 @@
       }
     },
 
-    /**
-     * Find zip drag-drop header for MelonMax
-     * @returns {HTMLElement|null}
-     */
     findZipDragDropHeader_MelonMax() {
-      // First, try to find it inside the visible modal
       const modal = document.querySelector('.modal.show, #dashboardModal');
-
-      if (modal) {
-        // Look for h6 specifically first (that's what we want)
-        const h6Candidates = Array.from(modal.querySelectorAll("h6"));
-
-        for (const el of h6Candidates) {
-          const text = normalizeText(el.textContent);
-          // Match "Choose Zip (Drag and Drop)" specifically
-          if (text.includes("Choose") && text.includes("Zip") && text.length < 50) {
-            log("Found h6 header inside modal:", {
-              tag: el.tagName,
-              text: text,
-              classes: el.className
-            });
-            return el;
-          }
-        }
-
-        // Fallback to other headers
-        const otherCandidates = Array.from(
-          modal.querySelectorAll("h5, h4, h3, label")
-        );
-
-        for (const el of otherCandidates) {
-          // Skip if too many children (likely a container)
-          if (el.children.length > 3) continue;
-
-          const text = normalizeText(el.textContent);
-          if (
-            text.includes("Choose") &&
-            text.includes("Zip") &&
-            text.length < 50
-          ) {
-            log("Found header inside modal:", {
-              tag: el.tagName,
-              text: text,
-              classes: el.className
-            });
-            return el;
-          }
-        }
+      if (!modal) return null;
+      const h6 = Array.from(modal.querySelectorAll("h6"));
+      for (const el of h6) {
+        const text = normalizeText(el.textContent);
+        if (text.includes("Choose") && text.includes("Zip") && text.length < 50) return el;
       }
-
-      log("Could not find drag-drop header in modal");
+      const others = Array.from(modal.querySelectorAll("h5, h4, h3, label"));
+      for (const el of others) {
+        if (el.children.length > 3) continue;
+        const text = normalizeText(el.textContent);
+        if (text.includes("Choose") && text.includes("Zip") && text.length < 50) return el;
+      }
       return null;
     },
   };
 
   // ============================================================
-  // MODAL BUILDER
+  // INLINE DASHBOARD — replaces ModalBuilder + FocusManager
   // ============================================================
 
-  const ModalBuilder = {
+  const InlineDashboard = {
     /**
-     * Create a Bootstrap-style modal
-     * @param {object} config - Modal configuration
-     * @returns {object} Modal elements
+     * Build a small button styled by variant.
      */
-    createModal(config) {
-      const {
-        id,
-        title,
-        textareaId,
-        textareaPlaceholder,
-        onClose,
-        ariaLabel = title,
-      } = config;
-
-      const modal = document.createElement("div");
-      modal.className = "modal fade show";
-      modal.id = id;
-      modal.style.display = "block";
-      modal.style.backgroundColor = "rgba(0,0,0,0.5)";
-      modal.setAttribute("role", "dialog");
-      modal.setAttribute("aria-modal", "true");
-      modal.setAttribute("aria-labelledby", `${id}-title`);
-
-      const dialog = document.createElement("div");
-      dialog.className = "modal-dialog";
-      dialog.style.marginTop = "50px";
-      dialog.setAttribute("role", "document");
-
-      const content = document.createElement("div");
-      content.className = "modal-content";
-      content.style.border = `1px solid ${SURFACE.border}`;
-
-      // Header
-      const header = document.createElement("div");
-      header.className = "modal-header";
-      header.style.backgroundColor = COLORS.alpine;
-      header.style.borderBottom = `1px solid ${SURFACE.border}`;
-
-      const h5 = document.createElement("h5");
-      h5.className = "modal-title";
-      h5.id = `${id}-title`;
-      h5.textContent = title;
-
-      const closeBtn = document.createElement("button");
-      closeBtn.type = "button";
-      closeBtn.className = "close";
-      closeBtn.innerHTML = "&times;";
-      closeBtn.setAttribute("aria-label", "Close");
-      closeBtn.style.background = "none";
-      closeBtn.style.border = "none";
-      closeBtn.style.fontSize = "1.5rem";
-      closeBtn.style.cursor = "pointer";
-
-      header.appendChild(h5);
-      header.appendChild(closeBtn);
-
-      // Body
-      const body = document.createElement("div");
-      body.className = "modal-body";
-
-      const textarea = document.createElement("textarea");
-      textarea.id = textareaId;
-      textarea.className = "form-control";
-      textarea.rows = 10;
-      textarea.placeholder = textareaPlaceholder;
-      textarea.style.width = "100%";
-      textarea.style.fontFamily = "monospace";
-      textarea.setAttribute("aria-label", ariaLabel);
-
-      body.appendChild(textarea);
-
-      // Footer
-      const footer = document.createElement("div");
-      footer.className = "modal-footer";
-      footer.style.borderTop = `1px solid ${SURFACE.border}`;
-
-      content.appendChild(header);
-      content.appendChild(body);
-      content.appendChild(footer);
-      dialog.appendChild(content);
-      modal.appendChild(dialog);
-
-      // ESC key handler declared first so closeHandler can unbind it.
-      let escHandler;
-
-      const closeHandler = () => {
-        try {
-          if (escHandler) {
-            document.removeEventListener("keydown", escHandler);
-            escHandler = null;
-          }
-          modal.remove();
-          FocusManager.restoreDashboardFocusManagement();
-          if (onClose) onClose();
-        } catch (error) {
-          logError("Error closing modal:", error);
-        }
-      };
-
-      closeBtn.onclick = closeHandler;
-
-      escHandler = (e) => {
-        if (e.key === "Escape") closeHandler();
-      };
-      document.addEventListener("keydown", escHandler);
-
-      return {
-        modal,
-        dialog,
-        content,
-        header,
-        body,
-        footer,
-        textarea,
-        closeBtn,
-        close: closeHandler,
-      };
-    },
-
-    /**
-     * Create an action button
-     * @param {string} text - Button text
-     * @param {Function} onClick - Click handler
-     * @param {string} variant - Button variant (primary, secondary, danger)
-     * @returns {HTMLButtonElement}
-     */
-    createActionButton(text, onClick, variant = "primary") {
+    makeButton(text, variant = "primary") {
       const btn = document.createElement("button");
       btn.type = "button";
       btn.textContent = text;
-      btn.style.marginLeft = "5px";
-
-      const variantStyles = {
-        primary: {
-          backgroundColor: COLORS.cactus,
-          color: "#fff",
-        },
-        secondary: {
-          backgroundColor: COLORS.sand,
-          color: COLORS.coconut,
-        },
-        danger: {
-          backgroundColor: COLORS.watermelonSugar,
-          color: "#fff",
-        },
-      };
-
-      const style = variantStyles[variant] || variantStyles.primary;
-      Object.assign(btn.style, {
-        ...style,
-        border: "none",
-        padding: "8px 16px",
-        borderRadius: "4px",
-        cursor: "pointer",
-        fontSize: "14px",
-      });
-
-      btn.addEventListener("click", onClick);
-      btn.addEventListener("mouseenter", () => {
-        btn.style.opacity = "0.9";
-      });
-      btn.addEventListener("mouseleave", () => {
-        btn.style.opacity = "1";
-      });
-
+      btn.className = `patch-inline-btn patch-inline-btn--${variant}`;
+      btn.dataset.originalText = text;
+      btn.dataset.originalVariant = variant;
       return btn;
+    },
+
+    /**
+     * Toggle a button into/out of "busy" state. Stores originals on
+     * data-* attrs so it can be restored exactly.
+     */
+    setBusy(btn, busy, label) {
+      if (busy) {
+        btn.disabled = true;
+        btn.classList.add("patch-inline-btn--busy");
+        if (label != null) btn.textContent = label;
+      } else {
+        btn.disabled = false;
+        btn.classList.remove("patch-inline-btn--busy");
+        btn.textContent = btn.dataset.originalText || btn.textContent;
+      }
+    },
+
+    /**
+     * Build an inline panel.
+     *
+     * @param {object} cfg
+     * @param {string} cfg.id           - Unique DOM id.
+     * @param {string} cfg.title        - Panel header text.
+     * @param {"add"|"remove"|"move"} cfg.mode
+     * @param {object} cfg.context      - Mode-specific data.
+     * @param {Function} cfg.onAction   - Async (intent, ui) => result. UI has {panel, status, runBtn, removeAllBtn?, textarea}.
+     * @param {Function} [cfg.onValidate] - (rawText, ui) => string  — sets the status label.
+     * @param {Array<{label:string, intent:string, variant?:string}>} cfg.actions
+     */
+    create(cfg) {
+      const panel = document.createElement("div");
+      panel.id = cfg.id;
+      panel.className = PANEL_IDS.inlinePanelClass;
+      panel.hidden = true;
+      panel.dataset.bulkPanel = cfg.mode;
+
+      // Header
+      const header = document.createElement("div");
+      header.className = `${PANEL_IDS.inlinePanelClass}-header`;
+      const titleEl = document.createElement("div");
+      titleEl.className = `${PANEL_IDS.inlinePanelClass}-title`;
+      titleEl.textContent = cfg.title;
+      const closeBtn = document.createElement("button");
+      closeBtn.type = "button";
+      closeBtn.className = `${PANEL_IDS.inlinePanelClass}-close`;
+      closeBtn.setAttribute("aria-label", "Close");
+      closeBtn.textContent = "×";
+      header.appendChild(titleEl);
+      header.appendChild(closeBtn);
+
+      // Textarea (omitted for "move" mode? we still want it for pasted move)
+      const textarea = document.createElement("textarea");
+      textarea.placeholder = cfg.placeholder || "Paste items, one per line or comma-separated...";
+
+      // Status span
+      const status = document.createElement("div");
+      status.className = `${PANEL_IDS.inlinePanelStatusClass} is-info`;
+
+      // Buttons row
+      const btnRow = document.createElement("div");
+      btnRow.className = `${PANEL_IDS.inlinePanelClass}-button-row`;
+
+      const cancelBtn = this.makeButton("Cancel", "secondary");
+
+      const actionButtons = [];
+      for (const action of cfg.actions || []) {
+        const btn = this.makeButton(action.label, action.variant || "primary");
+        btn.dataset.intent = action.intent;
+        actionButtons.push(btn);
+      }
+
+      btnRow.appendChild(cancelBtn);
+      for (const b of actionButtons) btnRow.appendChild(b);
+
+      panel.appendChild(header);
+      panel.appendChild(textarea);
+      panel.appendChild(status);
+      panel.appendChild(btnRow);
+
+      const ui = { panel, textarea, status, actionButtons, cancelBtn, closeBtn };
+
+      // Validation (live status)
+      const runValidation = () => {
+        try {
+          const labelText = cfg.onValidate ? cfg.onValidate(textarea.value, ui) : "";
+          status.innerHTML = labelText || "";
+          status.classList.remove("is-error", "is-warn");
+          status.classList.add("is-info");
+        } catch (error) {
+          logError("Validation error:", error);
+        }
+      };
+      const debouncedValidate = debounce(runValidation, 150);
+      textarea.addEventListener("input", debouncedValidate);
+
+      // Close handlers
+      const close = () => {
+        panel.hidden = true;
+      };
+      cancelBtn.addEventListener("click", close);
+      closeBtn.addEventListener("click", close);
+
+      // Action click handlers
+      for (const btn of actionButtons) {
+        btn.addEventListener("click", async () => {
+          if (btn.disabled) return;
+          // Disable other actions during the run
+          actionButtons.forEach((b) => { if (b !== btn) b.disabled = true; });
+          cancelBtn.disabled = true;
+          try {
+            await cfg.onAction(btn.dataset.intent, {
+              panel, textarea, status, runBtn: btn, ui, runValidation,
+            });
+          } catch (error) {
+            logError("Action error:", error);
+            status.classList.remove("is-info", "is-warn");
+            status.classList.add("is-error");
+            status.textContent = `Error: ${error?.message || error}`;
+            this.setBusy(btn, false);
+          } finally {
+            actionButtons.forEach((b) => { if (b !== btn) b.disabled = false; });
+            cancelBtn.disabled = false;
+          }
+        });
+      }
+
+      return {
+        panel,
+        textarea,
+        status,
+        actionButtons,
+        cancelBtn,
+        show() {
+          panel.hidden = false;
+          runValidation();
+          setTimeout(() => { try { textarea.focus(); } catch {} }, TIMING.FOCUS_DELAY_MS);
+        },
+        hide: close,
+        toggle() { panel.hidden ? this.show() : this.hide(); },
+        isVisible() { return !panel.hidden; },
+        runValidation,
+      };
     },
   };
 
   // ============================================================
-  // BULK ADD DIALOG
+  // INLINE ACTION RUNNERS — wire operations to inline panel UI
   // ============================================================
 
-  function openBulkAddDialog(typeKey) {
-    const targetType = BulkAddOperations.getTargetTypeConfig(typeKey);
-    if (!targetType) {
-      logError("Unknown target type:", typeKey);
-      return;
-    }
-
-    const { pretty } = targetType;
-
-    const modalConfig = {
-      id: "patchBulkAddModal",
+  function buildAddPanel(typeKey, pretty) {
+    const dashboard = InlineDashboard.create({
+      id: `patch-bulk-add-${typeKey}`,
       title: `Bulk Add ${pretty}`,
-      textareaId: ELEMENT_IDS.BULK_TEXTAREA,
-      textareaPlaceholder:
-        typeKey === "zip"
-          ? "Paste zip codes (one per line or comma-separated)..."
-          : `Paste ${pretty.toLowerCase()} (one per line or comma-separated)...`,
-      ariaLabel: `Bulk add ${pretty.toLowerCase()}`,
-    };
-
-    const { modal, footer, textarea, close } = ModalBuilder.createModal(modalConfig);
-
-    const cancelBtn = ModalBuilder.createActionButton("Cancel", close, "secondary");
-    const runBtn = ModalBuilder.createActionButton(
-      `Add ${pretty}`,
-      async () => {
+      mode: "add",
+      placeholder: typeKey === "zip"
+        ? "Paste zip codes (one per line or comma-separated)..."
+        : `Paste ${pretty.toLowerCase()} (one per line or comma-separated)...`,
+      actions: [{ label: `Add ${pretty}`, intent: "add", variant: "primary" }],
+      onValidate: (raw) => {
+        if (!raw.trim()) return `Paste ${pretty.toLowerCase()} to see how many will be added.`;
+        const { values, toAdd, skipped } = BulkAddOperations.plan(typeKey, raw);
+        const addCount = `<strong>${toAdd.length}</strong>`;
+        const totalCount = `<span class="badge">${values.length} pasted</span>`;
+        const dupNote = skipped.length
+          ? ` <span class="badge" style="background:${COLORS.lemonSun};color:${COLORS.coconut}">${skipped.length} duplicate(s)</span>`
+          : "";
+        return `Will add ${addCount} ${pretty.toLowerCase()} ${totalCount}${dupNote}`;
+      },
+      onAction: async (intent, { textarea, status, runBtn, runValidation }) => {
+        if (intent !== "add") return;
         const rawText = textarea.value || "";
-        close();
-        try {
-          await BulkAddOperations.run(typeKey, rawText);
-        } catch (error) {
-          logError("Bulk add error:", error);
-          alert(`Error during bulk add: ${error.message}`);
+        const { toAdd } = BulkAddOperations.plan(typeKey, rawText);
+        if (!toAdd.length) {
+          status.classList.remove("is-info");
+          status.classList.add("is-warn");
+          status.textContent = "Nothing to add (all values are empty or already targeted).";
+          return;
+        }
+
+        InlineDashboard.setBusy(runBtn, true, `(0/${toAdd.length}) Adding...`);
+        const onProgress = ({ completed, total }) => {
+          runBtn.textContent = `(${completed}/${total}) Adding...`;
+        };
+
+        const result = await BulkAddOperations.run(typeKey, rawText, TIMING.DEFAULT_DELAY_MS, { onProgress });
+        InlineDashboard.setBusy(runBtn, false);
+
+        status.classList.remove("is-info", "is-warn", "is-error");
+        if (result.ok) {
+          status.classList.add("is-info");
+          status.textContent = result.message;
+          // Re-run validation against the (now updated) chip list so dup
+          // counts update if the user keeps the panel open.
+          runValidation();
+        } else {
+          status.classList.add("is-warn");
+          status.textContent = result.message || "No-op.";
         }
       },
-      "primary"
-    );
-
-    footer.appendChild(cancelBtn);
-    footer.appendChild(runBtn);
-
-    document.body.appendChild(modal);
-    FocusManager.suspendDashboardFocusManagement(modal);
-
-    setTimeout(() => {
-      try {
-        textarea.focus();
-      } catch (error) {
-        logError("Error focusing textarea:", error);
-      }
-    }, TIMING.FOCUS_DELAY_MS);
+    });
+    return dashboard;
   }
 
-  // ============================================================
-  // BULK REMOVE DIALOG
-  // ============================================================
-
-  function openBulkRemoveDialog(typeKey) {
-    const targetType = BulkAddOperations.getTargetTypeConfig(typeKey);
-    if (!targetType) {
-      logError("Unknown target type:", typeKey);
-      return;
-    }
-
-    const { pretty } = targetType;
-
-    const modalConfig = {
-      id: "patchBulkRemoveModal",
+  function buildRemovePanel(typeKey, pretty) {
+    const dashboard = InlineDashboard.create({
+      id: `patch-bulk-remove-${typeKey}`,
       title: `Bulk Remove ${pretty}`,
-      textareaId: ELEMENT_IDS.BULK_REMOVE_TEXTAREA,
-      textareaPlaceholder:
-        typeKey === "zip"
-          ? "Paste zip codes to remove (one per line or comma-separated)..."
-          : `Paste ${pretty.toLowerCase()} to remove (one per line or comma-separated)...`,
-      ariaLabel: `Bulk remove ${pretty.toLowerCase()}`,
-    };
-
-    const { modal, footer, textarea, close } = ModalBuilder.createModal(modalConfig);
-
-    const cancelBtn = ModalBuilder.createActionButton("Cancel", close, "secondary");
-    const runBtn = ModalBuilder.createActionButton(
-      `Remove ${pretty}`,
-      async () => {
-        const rawText = textarea.value || "";
-        close();
-        try {
-          await BulkRemoveOperations.run(typeKey, rawText);
-        } catch (error) {
-          logError("Bulk remove error:", error);
-          alert(`Error during bulk remove: ${error.message}`);
+      mode: "remove",
+      placeholder: typeKey === "zip"
+        ? "Paste zip codes to remove (one per line or comma-separated)..."
+        : `Paste ${pretty.toLowerCase()} to remove (one per line or comma-separated)...`,
+      actions: [
+        { label: `Remove ${pretty}`, intent: "remove", variant: "danger" },
+        { label: `Remove ALL ${pretty}`, intent: "removeAll", variant: "danger" },
+      ],
+      onValidate: (raw) => {
+        const existingCount = BulkRemoveOperations.collectChipTargetNames(typeKey).length
+          || Array.from(document.querySelectorAll("#exampleTable tbody tr")).length;
+        const onPage = `<span class="badge">${existingCount} on page</span>`;
+        if (!raw.trim()) {
+          return `Paste ${pretty.toLowerCase()} to see how many will be removed, or click <strong>Remove ALL ${pretty}</strong>. ${onPage}`;
         }
+        const values = typeKey === "zip" ? parseZips(raw) : parseLinesOrCsv(raw);
+        return `Will remove <strong>${values.length}</strong> ${pretty.toLowerCase()} ${onPage}`;
       },
-      "danger"
-    );
-    const removeAllBtn = ModalBuilder.createActionButton(
-      `Remove ALL ${pretty}`,
-      async () => {
-        close();
-        try {
-          await BulkRemoveOperations.removeAll(typeKey);
-        } catch (error) {
-          logError("Remove all error:", error);
-          alert(`Error during remove all: ${error.message}`);
-        }
-      },
-      "danger"
-    );
+      onAction: async (intent, { textarea, status, runBtn, runValidation, ui }) => {
+        const isRemoveAll = intent === "removeAll";
 
-    footer.appendChild(cancelBtn);
-    footer.appendChild(runBtn);
-    footer.appendChild(removeAllBtn);
-
-    document.body.appendChild(modal);
-    FocusManager.suspendDashboardFocusManagement(modal);
-
-    setTimeout(() => {
-      try {
-        textarea.focus();
-      } catch (error) {
-        logError("Error focusing textarea:", error);
-      }
-    }, TIMING.FOCUS_DELAY_MS);
-  }
-
-  // ============================================================
-  // BULK MOVE DIALOG
-  // ============================================================
-
-  function openBulkMoveModal(pairGetter, titleGetter) {
-    const getTitle = () => {
-      try {
-        if (typeof titleGetter === "function") {
-          const result = titleGetter(window.jQuery);
-          return typeof result === "string" ? result : "Bulk Move Targeting";
-        }
-        return titleGetter || "Bulk Move Targeting";
-      } catch (error) {
-        logError("Error getting modal title:", error);
-        return "Bulk Move Targeting";
-      }
-    };
-
-    const modalConfig = {
-      id: "patchBulkMoveModal",
-      title: getTitle(),
-      textareaId: ELEMENT_IDS.BULK_MOVE_TEXTAREA,
-      textareaPlaceholder: "Paste items to move (one per line or comma-separated)...",
-      ariaLabel: "Bulk move targeting items",
-    };
-
-    const { modal, footer, textarea, close } = ModalBuilder.createModal(modalConfig);
-
-    const cancelBtn = ModalBuilder.createActionButton("Cancel", close, "secondary");
-
-    const NO_LISTBOXES_MSG = "Could not find the two listboxes. Make sure the targeting area is visible.";
-
-    const makeMoveBtn = (label, mode, direction) =>
-      ModalBuilder.createActionButton(
-        label,
-        () => {
-          const lbs = pairGetter();
-          if (!lbs) {
-            alert(NO_LISTBOXES_MSG);
-            close();
+        // Confirm guard for destructive Remove ALL
+        if (isRemoveAll) {
+          const onPage = BulkRemoveOperations.collectChipTargetNames(typeKey).length
+            || Array.from(document.querySelectorAll("#exampleTable tbody tr")).length;
+          if (!onPage) {
+            status.classList.remove("is-info");
+            status.classList.add("is-warn");
+            status.textContent = `No ${pretty} to remove.`;
             return;
           }
-          const [from, to] = direction === "AtoU"
-            ? [lbs.available, lbs.useThese]
-            : [lbs.useThese, lbs.available];
-          const summary = direction === "AtoU"
-            ? "Available → Use These"
-            : "Use These → Available";
+          if (!confirm(`Remove ALL ${onPage} ${pretty}? This cannot be undone.`)) return;
+        }
 
-          let moved;
-          if (mode === "pasted") {
-            const values = parseLinesOrCsv(textarea.value || "");
-            if (!values.length) {
-              close();
-              return;
-            }
-            moved = BulkMoveOperations.moveItemsByText(from, to, values);
+        const rawText = textarea.value || "";
+        const expected = isRemoveAll
+          ? (BulkRemoveOperations.collectChipTargetNames(typeKey).length
+              || Array.from(document.querySelectorAll("#exampleTable tbody tr")).length)
+          : (typeKey === "zip" ? parseZips(rawText).length : parseLinesOrCsv(rawText).length);
+
+        if (expected === 0) {
+          status.classList.remove("is-info");
+          status.classList.add("is-warn");
+          status.textContent = "Nothing to remove.";
+          return;
+        }
+
+        InlineDashboard.setBusy(runBtn, true, `(0/${expected}) Removing...`);
+        const onProgress = ({ completed, total }) => {
+          runBtn.textContent = `(${completed}/${total}) Removing...`;
+        };
+
+        const result = isRemoveAll
+          ? await BulkRemoveOperations.removeAll(typeKey, TIMING.DEFAULT_DELAY_MS, { onProgress })
+          : await BulkRemoveOperations.run(typeKey, rawText, TIMING.DEFAULT_DELAY_MS, { onProgress });
+
+        InlineDashboard.setBusy(runBtn, false);
+
+        status.classList.remove("is-info", "is-warn", "is-error");
+        if (result.ok) {
+          status.classList.add("is-info");
+          status.textContent = result.message;
+          if (result.reload) {
+            status.textContent += "  •  Reloading page...";
+            setTimeout(() => location.reload(), 500);
           } else {
-            moved = BulkMoveOperations.moveAll(from, to);
+            runValidation();
           }
-          alert(`Moved ${moved} item(s) from ${summary}.`);
-          close();
-        },
-        "primary"
-      );
+        } else {
+          status.classList.add("is-warn");
+          status.textContent = result.message || "No-op.";
+        }
+      },
+    });
+    return dashboard;
+  }
 
-    footer.appendChild(cancelBtn);
-    footer.appendChild(makeMoveBtn("Move (Pasted) Available → Use These", "pasted", "AtoU"));
-    footer.appendChild(makeMoveBtn("Move (Pasted) Use These → Available", "pasted", "UtoA"));
-    footer.appendChild(makeMoveBtn("Move ALL Available → Use These", "all", "AtoU"));
-    footer.appendChild(makeMoveBtn("Move ALL Use These → Available", "all", "UtoA"));
+  function buildMovePanel({ id, titleProvider, pairGetter }) {
+    const titleText = typeof titleProvider === "function"
+      ? (titleProvider(window.jQuery) || "Bulk Move Targeting")
+      : (titleProvider || "Bulk Move Targeting");
 
-    document.body.appendChild(modal);
-    FocusManager.suspendDashboardFocusManagement(modal);
+    const dashboard = InlineDashboard.create({
+      id,
+      title: titleText,
+      mode: "move",
+      placeholder: "Paste items to move (one per line or comma-separated)...",
+      actions: [
+        { label: "Pasted: Available → Use These", intent: "pasted-AtoU", variant: "primary" },
+        { label: "Pasted: Use These → Available", intent: "pasted-UtoA", variant: "primary" },
+        { label: "ALL: Available → Use These",    intent: "all-AtoU",    variant: "primary" },
+        { label: "ALL: Use These → Available",    intent: "all-UtoA",    variant: "primary" },
+      ],
+      onValidate: (raw) => {
+        const lbs = pairGetter();
+        if (!lbs) return `<span style="color:${COLORS.cranberry}">ListBoxes not found yet — make sure the targeting area is visible.</span>`;
+        const aCount = BulkMoveOperations.getItemsArray(lbs.available).length;
+        const uCount = BulkMoveOperations.getItemsArray(lbs.useThese).length;
+        const lhs = `<span class="badge">${aCount} Available</span> <span class="badge">${uCount} Use These</span>`;
+        if (!raw.trim()) return `Paste items, or use the ALL buttons. ${lhs}`;
+        const values = parseLinesOrCsv(raw);
+        return `Will move <strong>${values.length}</strong> pasted item(s). ${lhs}`;
+      },
+      onAction: async (intent, { textarea, status, runBtn, runValidation }) => {
+        const lbs = pairGetter();
+        if (!lbs) {
+          status.classList.remove("is-info");
+          status.classList.add("is-error");
+          status.textContent = "Could not find the two listboxes. Make sure the targeting area is visible.";
+          return;
+        }
+        const isPasted = intent.startsWith("pasted-");
+        const isAtoU = intent.endsWith("-AtoU");
+        const [from, to] = isAtoU ? [lbs.available, lbs.useThese] : [lbs.useThese, lbs.available];
+        const summary = isAtoU ? "Available → Use These" : "Use These → Available";
 
-    setTimeout(() => {
-      try {
-        textarea.focus();
-      } catch (error) {
-        logError("Error focusing textarea:", error);
-      }
-    }, TIMING.FOCUS_DELAY_MS);
+        let total;
+        if (isPasted) {
+          const values = parseLinesOrCsv(textarea.value || "");
+          if (!values.length) {
+            status.classList.add("is-warn");
+            status.textContent = "Paste items first.";
+            return;
+          }
+          // Estimate total (values that exist in source)
+          const sourceTexts = new Set(BulkMoveOperations.getItemsArray(from).map((x) => x.text.toLowerCase()));
+          total = values.filter((v) => sourceTexts.has(normalizeText(v).toLowerCase())).length;
+        } else {
+          total = BulkMoveOperations.getItemsArray(from).length;
+        }
+
+        if (total === 0) {
+          status.classList.add("is-warn");
+          status.textContent = "Nothing to move.";
+          return;
+        }
+
+        InlineDashboard.setBusy(runBtn, true, `(0/${total}) Moving...`);
+        const onProgress = ({ completed, total }) => {
+          runBtn.textContent = `(${completed}/${total}) Moving...`;
+        };
+
+        let moved;
+        if (isPasted) {
+          const values = parseLinesOrCsv(textarea.value || "");
+          moved = BulkMoveOperations.moveItemsByText(from, to, values, { onProgress });
+        } else {
+          moved = BulkMoveOperations.moveAll(from, to, { onProgress });
+        }
+
+        InlineDashboard.setBusy(runBtn, false);
+        status.classList.remove("is-info", "is-warn", "is-error");
+        status.classList.add("is-info");
+        status.textContent = `Moved ${moved} item(s) ${summary}.`;
+        runValidation();
+      },
+    });
+    return dashboard;
   }
 
   // ============================================================
@@ -1690,13 +1191,10 @@
   // ============================================================
 
   const ButtonInjector = {
-    /**
-     * Create a button matching style of reference button
-     * @param {HTMLElement} refBtn - Reference button
-     * @param {string} text - Button text
-     * @param {Function} onClick - Click handler
-     * @returns {HTMLButtonElement}
-     */
+    // Track injected dashboards so handlers don't double-fire and we can
+    // hide siblings when one opens.
+    _injected: new WeakMap(), // addBtn -> { addPanel, removePanel }
+
     createMatchingButton(refBtn, text, onClick) {
       const btn = document.createElement("button");
       btn.type = "button";
@@ -1704,25 +1202,19 @@
       btn.className = refBtn?.className || "btn btn--small melon-green";
       btn.removeAttribute("style");
       btn.dataset.bulkInjected = "1";
-      if (typeof onClick === "function") {
-        btn.addEventListener("click", onClick);
-      }
+      if (typeof onClick === "function") btn.addEventListener("click", onClick);
       return btn;
     },
 
-    /**
-     * Inject bulk buttons for a target type
-     * @param {string} handlerName - Handler function name
-     * @param {string} typeKey - Target type key
-     */
-    injectForTargetType(handlerName, typeKey) {
+    injectForTargetType(handlerName, typeKey, pretty) {
       const addBtn = document.querySelector(`button[onclick="${handlerName}()"]`);
       if (!addBtn) return;
+      if (addBtn.dataset.bulkPanelInjected) return;
 
-      // Normalize existing bulk button styles
+      // Normalize style of any pre-existing Bulk Add/Remove buttons
       const siblings = Array.from(addBtn.parentElement?.children || []);
       for (const el of siblings) {
-        if (el && el.tagName === "BUTTON") {
+        if (el?.tagName === "BUTTON") {
           const text = normalizeText(el.textContent);
           if (text === "Bulk Add" || text === "Bulk Remove") {
             el.className = addBtn.className;
@@ -1731,161 +1223,160 @@
         }
       }
 
-      // Inject Bulk Remove button
+      const addPanel = buildAddPanel(typeKey, pretty);
+      const removePanel = buildRemovePanel(typeKey, pretty);
+
+      // Mount the panels after the entire input/button row
+      const rowParent = addBtn.parentElement;
+      const mountAnchor = rowParent || addBtn;
+      insertAfter(addPanel.panel, mountAnchor);
+      insertAfter(removePanel.panel, addPanel.panel);
+
+      // Inject Bulk Remove + Bulk Add buttons (Bulk Add inserted last so it
+      // ends up adjacent to the Add button).
       if (!addBtn.dataset.bulkRemoveInjected) {
-        const removeBtn = this.createMatchingButton(addBtn, "Bulk Remove", () =>
-          openBulkRemoveDialog(typeKey)
-        );
-        insertAfter(removeBtn, addBtn);
+        const bulkRemoveBtn = this.createMatchingButton(addBtn, "Bulk Remove", () => {
+          addPanel.hide();
+          removePanel.toggle();
+        });
+        insertAfter(bulkRemoveBtn, addBtn);
         addBtn.dataset.bulkRemoveInjected = "1";
       }
-
-      // Inject Bulk Add button
       if (!addBtn.dataset.bulkAddInjected) {
-        const bulkAddBtn = this.createMatchingButton(addBtn, "Bulk Add", () =>
-          openBulkAddDialog(typeKey)
-        );
+        const bulkAddBtn = this.createMatchingButton(addBtn, "Bulk Add", () => {
+          removePanel.hide();
+          addPanel.toggle();
+        });
         insertAfter(bulkAddBtn, addBtn);
         addBtn.dataset.bulkAddInjected = "1";
       }
+
+      addBtn.dataset.bulkPanelInjected = "1";
+      this._injected.set(addBtn, { addPanel, removePanel });
     },
 
-    /**
-     * Inject all target buttons
-     */
     injectTargetButtons() {
-      this.injectForTargetType("NewTargetCounty", "county");
-      this.injectForTargetType("NewTargetCity", "city");
-      this.injectForTargetType("NewTargetZip", "zip");
+      this.injectForTargetType("NewTargetCounty", "county", "Counties");
+      this.injectForTargetType("NewTargetCity", "city", "Cities");
+      this.injectForTargetType("NewTargetZip", "zip", "Zip Codes");
     },
 
     /**
-     * Inject bulk move button for MelonMax
+     * Inject Bulk Move inline panel for MelonMax page.
      */
     injectBulkMoveButton_MelonMax() {
       if (!PageDetector.isMelonMaxBudgetDetails) return;
-
-      // Don't inject if button already exists
-      if (document.getElementById(ELEMENT_IDS.BULK_MOVE_BTN)) return;
-
+      if (document.getElementById("patch-bulk-move-melonmax")) return;
       const header = BulkMoveOperations.findZipDragDropHeader_MelonMax();
-      if (!header) {
-        log("Could not find drag-drop header for MelonMax bulk move button");
-        return;
-      }
+      if (!header) return;
 
-      log("Found drag-drop header, injecting bulk move button", {
-        headerTag: header.tagName,
-        headerText: header.textContent.substring(0, 50)
+      const dashboard = buildMovePanel({
+        id: "patch-bulk-move-melonmax",
+        titleProvider: "Bulk Move Targeting",
+        pairGetter: () => BulkMoveOperations.getListBoxPairBySelectIds("UpdateBudgetTargetId", "UpdateListbox2"),
       });
 
-      const btn = document.createElement("button");
-      btn.id = ELEMENT_IDS.BULK_MOVE_BTN;
-      btn.type = "button";
-      btn.className = "btn btn--small melon-green";
-      btn.style.marginLeft = "10px";
-      btn.style.marginTop = "10px";
-      btn.textContent = "Bulk Move";
+      const triggerBtn = document.createElement("button");
+      triggerBtn.type = "button";
+      triggerBtn.id = "patchBulkMoveZipsBtn";
+      triggerBtn.className = "btn btn--small melon-green";
+      triggerBtn.style.marginLeft = "10px";
+      triggerBtn.style.marginTop = "10px";
+      triggerBtn.textContent = "Bulk Move";
+      triggerBtn.addEventListener("click", () => dashboard.toggle());
 
-      btn.addEventListener("click", () =>
-        openBulkMoveModal(
-          () => BulkMoveOperations.getListBoxPairBySelectIds("UpdateBudgetTargetId", "UpdateListbox2"),
-          () => "Bulk Move Targeting"
-        )
-      );
-
-      // Try different insertion strategies
       try {
-        // First try: insert after the header
-        header.insertAdjacentElement("afterend", btn);
-        log("Bulk move button injected successfully");
+        header.insertAdjacentElement("afterend", triggerBtn);
+        insertAfter(dashboard.panel, triggerBtn);
       } catch (error) {
-        logError("Error injecting bulk move button:", error);
-        // Fallback: try appending to parent
+        logError("MelonMax inline injection failed:", error);
         try {
-          header.parentElement?.appendChild(btn);
-          log("Bulk move button injected (fallback method)");
+          header.parentElement?.appendChild(triggerBtn);
+          header.parentElement?.appendChild(dashboard.panel);
         } catch (e2) {
-          logError("Fallback injection also failed:", e2);
+          logError("MelonMax fallback injection failed:", e2);
         }
       }
     },
 
     /**
-     * Inject bulk move buttons for Agents Budget Details
+     * Inject Bulk Move inline panels for Agents BudgetDetails (one or two
+     * areas).
      */
     injectBulkMoveButtons_AgentsBudgetDetails() {
       if (!PageDetector.isAgentsBudgetDetails) return;
 
-      // First targeting area
-      const header1 = document.getElementById("UpdateTargetTypeHeader");
-      const example1 = document.getElementById("UpdateExample");
+      const wireOne = ({ headerId, exampleId, btnId, panelId, sourceSelectId, destSelectId, dropdownId, suffix }) => {
+        const header = document.getElementById(headerId);
+        const example = document.getElementById(exampleId);
+        if (!header || !example) return;
+        if (document.getElementById(btnId)) return;
 
-      if (header1 && example1 && !document.getElementById(ELEMENT_IDS.BULK_MOVE_BTN_UPDATE1)) {
-        const btn1 = document.createElement("button");
-        btn1.id = ELEMENT_IDS.BULK_MOVE_BTN_UPDATE1;
-        btn1.type = "button";
-        btn1.className = "btn btn--small melon-green";
-        btn1.style.marginLeft = "10px";
-        btn1.textContent = "Bulk Move";
+        const titleProvider = ($) => {
+          try {
+            const ddl = $?.(`#${dropdownId}`)?.data?.("kendoDropDownList");
+            const raw = ddl ? String(ddl.text() || "").trim() : "Targeting";
+            const label = raw.charAt(0).toUpperCase() + raw.slice(1).toLowerCase();
+            return `Bulk Move ${label}${suffix ? " " + suffix : ""}`;
+          } catch {
+            return "Bulk Move Targeting";
+          }
+        };
 
-        btn1.addEventListener("click", () =>
-          openBulkMoveModal(
-            () => BulkMoveOperations.getListBoxPairBySelectIds("UpdateBudgetTargetId", "UpdateListbox2"),
-            ($) => {
-              const ddl = $("#UpdateBudgetTargetTypeId").data("kendoDropDownList");
-              const raw = ddl ? String(ddl.text() || "").trim() : "Targeting";
-              const label = raw.charAt(0).toUpperCase() + raw.slice(1).toLowerCase();
-              return `Bulk Move ${label}`;
-            }
-          )
-        );
+        const dashboard = buildMovePanel({
+          id: panelId,
+          titleProvider,
+          pairGetter: () => BulkMoveOperations.getListBoxPairBySelectIds(sourceSelectId, destSelectId),
+        });
 
-        header1.insertAdjacentElement("afterend", btn1);
-      }
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.id = btnId;
+        btn.className = "btn btn--small melon-green";
+        btn.style.marginLeft = "10px";
+        btn.textContent = `Bulk Move${suffix ? " " + suffix : ""}`;
+        btn.addEventListener("click", () => dashboard.toggle());
 
-      // Second targeting area (if visible)
+        header.insertAdjacentElement("afterend", btn);
+        insertAfter(dashboard.panel, btn);
+      };
+
+      wireOne({
+        headerId: "UpdateTargetTypeHeader",
+        exampleId: "UpdateExample",
+        btnId: "patchBulkMoveZipsBtn_update1",
+        panelId: "patch-bulk-move-update1",
+        sourceSelectId: "UpdateBudgetTargetId",
+        destSelectId: "UpdateListbox2",
+        dropdownId: "UpdateBudgetTargetTypeId",
+        suffix: "",
+      });
+
       const container2 = document.getElementById("UpdateTargetTypeContainer2");
-      const header2 = document.getElementById("UpdateTargetTypeHeader2");
-      const example2 = document.getElementById("UpdateExample2");
-
-      const visible2 =
-        container2 &&
-        container2.style.display !== "none" &&
-        container2.offsetParent !== null;
-
-      if (
-        visible2 &&
-        header2 &&
-        example2 &&
-        !document.getElementById(ELEMENT_IDS.BULK_MOVE_BTN_UPDATE2)
-      ) {
-        const btn2 = document.createElement("button");
-        btn2.id = ELEMENT_IDS.BULK_MOVE_BTN_UPDATE2;
-        btn2.type = "button";
-        btn2.className = "btn btn--small melon-green";
-        btn2.style.marginLeft = "10px";
-        btn2.textContent = "Bulk Move (2nd Target)";
-
-        btn2.addEventListener("click", () =>
-          openBulkMoveModal(
-            () => BulkMoveOperations.getListBoxPairBySelectIds("UpdateBudgetTargetId2", "UpdateListbox22"),
-            ($) => {
-              const ddl2 = $("#UpdateBudgetTargetTypeId2").data("kendoDropDownList");
-              const raw2 = ddl2 ? String(ddl2.text() || "").trim() : "Targeting";
-              const label2 = raw2.charAt(0).toUpperCase() + raw2.slice(1).toLowerCase();
-              return `Bulk Move ${label2} (2nd Target)`;
-            }
-          )
-        );
-
-        header2.insertAdjacentElement("afterend", btn2);
+      const visible2 = container2 && container2.style.display !== "none" && container2.offsetParent !== null;
+      if (visible2) {
+        wireOne({
+          headerId: "UpdateTargetTypeHeader2",
+          exampleId: "UpdateExample2",
+          btnId: "patchBulkMoveZipsBtn_update2",
+          panelId: "patch-bulk-move-update2",
+          sourceSelectId: "UpdateBudgetTargetId2",
+          destSelectId: "UpdateListbox22",
+          dropdownId: "UpdateBudgetTargetTypeId2",
+          suffix: "(2nd Target)",
+        });
       }
+    },
+
+    injectAllInlineUI() {
+      this.injectTargetButtons();
+      this.injectBulkMoveButton_MelonMax();
+      this.injectBulkMoveButtons_AgentsBudgetDetails();
     },
   };
 
   // ============================================================
-  // INITIALIZATION & POLLING
+  // INITIALIZATION
   // ============================================================
 
   const AppController = {
@@ -1893,25 +1384,17 @@
     beforeUnloadHandler: null,
     _waiting: false,
 
-    /**
-     * Wait for edit target buttons to appear. Guarded so overlapping
-     * invocations can't stack concurrent poll loops.
-     * @returns {Promise<void>}
-     */
     async waitForEditTargetsButtons() {
       if (this._waiting) return;
       this._waiting = true;
       try {
         for (let i = 0; i < TIMING.MAX_WAIT_ITERATIONS; i++) {
-          const countyBtn = document.querySelector('button[onclick="NewTargetCounty()"]');
-          const cityBtn = document.querySelector('button[onclick="NewTargetCity()"]');
-          const zipBtn = document.querySelector('button[onclick="NewTargetZip()"]');
-
-          if (countyBtn || cityBtn || zipBtn) {
+          const any = ["NewTargetCounty", "NewTargetCity", "NewTargetZip"]
+            .some((h) => document.querySelector(`button[onclick="${h}()"]`));
+          if (any) {
             ButtonInjector.injectTargetButtons();
             return;
           }
-
           await sleep(TIMING.WAIT_ITERATION_DELAY_MS);
         }
       } finally {
@@ -1919,98 +1402,60 @@
       }
     },
 
-    /**
-     * Initial injection pass.
-     */
     tick() {
-      this.waitForEditTargetsButtons().catch((error) => {
-        logError("Error waiting for edit target buttons:", error);
-      });
+      this.waitForEditTargetsButtons().catch((e) => logError("waitForEditTargetsButtons:", e));
       ButtonInjector.injectBulkMoveButton_MelonMax();
       ButtonInjector.injectBulkMoveButtons_AgentsBudgetDetails();
     },
 
-    /**
-     * Debounced mutation handler — the observer is the only steady-state
-     * driver for re-injection, so make sure all injectors run here.
-     */
     handleMutations: debounce(function () {
-      ButtonInjector.injectBulkMoveButton_MelonMax();
-      ButtonInjector.injectBulkMoveButtons_AgentsBudgetDetails();
-      ButtonInjector.injectTargetButtons();
+      ButtonInjector.injectAllInlineUI();
     }, 300),
 
-    /**
-     * Initialize the application
-     */
     init() {
       log("Initializing", VERSION);
-
-      // Inject global styles
       injectGlobalStyles();
-
-      // Initial tick
       this.tick();
 
-      // Setup mutation observer — this is the sole re-injection trigger
-      // after init (setInterval polling was removed to avoid double-firing).
-      this.mutationObserver = new MutationObserver(() => {
-        this.handleMutations();
-      });
-
+      this.mutationObserver = new MutationObserver(() => this.handleMutations());
       this.mutationObserver.observe(document.documentElement || document.body, {
         childList: true,
         subtree: true,
       });
 
-      // Fill in the shared _debug object so window.PatchTargetingHelper
-      // exposes the same references that PatchTargetingHelperDebug sees.
       Object.assign(_debug, {
-        FocusManager,
         BulkAddOperations,
         BulkRemoveOperations,
         BulkMoveOperations,
         ButtonInjector,
         PageDetector,
         ApiClient,
+        InlineDashboard,
       });
-
-      window.PatchTargetingHelper = {
-        version: VERSION,
-        _debug,
-      };
+      window.PatchTargetingHelper = { version: VERSION, _debug };
 
       log("Loaded successfully");
     },
 
-    /**
-     * Cleanup on unload
-     */
     cleanup() {
       if (this.mutationObserver) {
         this.mutationObserver.disconnect();
         this.mutationObserver = null;
       }
-
       if (this.beforeUnloadHandler) {
         window.removeEventListener("beforeunload", this.beforeUnloadHandler);
         this.beforeUnloadHandler = null;
       }
-
-      FocusManager.restoreDashboardFocusManagement();
-
       log("Cleaned up");
     },
   };
 
-  // Initialize when DOM is ready
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", () => AppController.init());
   } else {
     AppController.init();
   }
 
-  // Cleanup on page unload — keep a reference so cleanup() can unbind it.
   AppController.beforeUnloadHandler = () => AppController.cleanup();
   window.addEventListener("beforeunload", AppController.beforeUnloadHandler);
 })();
