@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Daily Cap Calculator - Melon Local (Enhanced)
 // @namespace    https://thepatch.melonlocal.com/
-// @version      3.7.3
+// @version      3.7.5
 // @description  Paces budgets evenly through end of month. Auto-fills from page data. Refresh + Freeze. Enhanced with auto-save, export/import, keyboard shortcuts, and improved UX.
 // @author       Melon Local
 // @match        https://thepatch.melonlocal.com/*
@@ -75,6 +75,105 @@
     }
 
     return false;
+  }
+
+  // ============================================================================
+  // SHARED DOCK MANAGER (Melon Local cross-script)
+  // Coordinates multiple Melon Local userscripts that dock to the right edge.
+  //
+  // Communicates across scripts — including across @grant sandbox boundaries
+  // where each script gets its own `window` — by stashing the dock list as
+  // JSON on <body data-melon-local-docks="..."> and broadcasting a custom DOM
+  // event. `document` is shared regardless of grant mode, so this works
+  // between sandboxed (`@grant GM_*`) and page-context (`@grant none`) scripts.
+  //
+  // Each script keeps its own onLayout callbacks locally (functions can't
+  // round-trip through the JSON channel). When any script writes the shared
+  // state, every script's listener fires and reflows its own panels.
+  // ============================================================================
+
+  const DockManager = (function createMelonDockManager() {
+    const ATTR = 'data-melon-local-docks';
+    const EVENT = 'melon-local-docks-changed';
+    const localCallbacks = new Map();
+
+    const readSharedDocks = () => {
+      try {
+        const raw = document.body && document.body.getAttribute(ATTR);
+        return raw ? JSON.parse(raw) : [];
+      } catch (e) {
+        return [];
+      }
+    };
+
+    const writeSharedDocks = (arr) => {
+      if (!document.body) return;
+      document.body.setAttribute(ATTR, JSON.stringify(arr));
+      document.dispatchEvent(new CustomEvent(EVENT));
+    };
+
+    const reflow = () => {
+      const docks = readSharedDocks();
+      let total = 0;
+      for (const d of docks) total += d.width;
+      try {
+        document.body.style.marginRight = total ? total + 'px' : '';
+      } catch (e) { /* body may not exist in edge cases */ }
+
+      // Each id's right-offset is the sum of widths AFTER its slot.
+      // Walking in reverse builds the cumulative-from-the-right value cheaply.
+      const offsets = new Map();
+      let cumulative = 0;
+      for (let i = docks.length - 1; i >= 0; i--) {
+        offsets.set(docks[i].id, cumulative);
+        cumulative += docks[i].width;
+      }
+      for (const [id, cb] of localCallbacks) {
+        const offset = offsets.get(id);
+        if (typeof offset === 'number') {
+          try { cb(offset, total); } catch (e) {
+            console.warn('[MelonDockManager] onLayout callback threw:', e);
+          }
+        }
+      }
+    };
+
+    document.addEventListener(EVENT, reflow);
+
+    return {
+      register(id, width, onLayout) {
+        localCallbacks.set(id, onLayout);
+        const docks = readSharedDocks().filter((d) => d.id !== id);
+        docks.push({ id, width });
+        writeSharedDocks(docks);
+      },
+      unregister(id) {
+        localCallbacks.delete(id);
+        const docks = readSharedDocks().filter((d) => d.id !== id);
+        writeSharedDocks(docks);
+      },
+      has(id) { return localCallbacks.has(id); },
+      listLocal() { return [...localCallbacks.keys()]; },
+      listShared() { return readSharedDocks().map((d) => d.id); }
+    };
+  })();
+
+  const PANEL_ID    = 'daily-cap-calculator';
+  const PANEL_WIDTH = 460;
+
+  // Helper: register this panel with a live onLayout callback.
+  function dockRegister() {
+    DockManager.register(PANEL_ID, PANEL_WIDTH, (offset) => {
+      const el = document.getElementById(PANEL_ID);
+      if (el) el.style.right = offset + 'px';
+    });
+  }
+
+  // Helper: unregister and reset this panel's inline right value.
+  function dockUnregister() {
+    DockManager.unregister(PANEL_ID);
+    const el = document.getElementById(PANEL_ID);
+    if (el) el.style.right = '';
   }
 
   // ============================================================================
@@ -719,7 +818,6 @@
     /* ── Sidebar Dock ────────────────────────────────────────────────────── */
     #daily-cap-calculator.dcc-docked {
       bottom: 0 !important;
-      right: 0 !important;
       top: 0 !important;
       height: 100vh !important;
       max-height: 100vh !important;
@@ -1857,12 +1955,12 @@
       const btn  = State.dom.dockBtn;
       if (State.docked) {
         calc.classList.add('dcc-docked');
-        document.body.style.marginRight = '460px';
+        dockRegister();           // registry sets right offset + body margin
         btn.classList.add('docked');
         btn.innerHTML = '&#8701; Undock';
       } else {
+        dockUnregister();         // registry clears right offset + recalculates body margin
         calc.classList.remove('dcc-docked');
-        document.body.style.marginRight = '';
         btn.classList.remove('docked');
         btn.innerHTML = '&#8700; Dock';
       }
@@ -2154,7 +2252,7 @@
 
         const visible = shouldShowCalculator();
         calc.style.display = visible ? '' : 'none';
-        document.body.style.marginRight = (visible && State.docked) ? '460px' : '';
+        if (visible && State.docked) { dockRegister(); } else { dockUnregister(); }
 
         if (visible && !State.frozen && isDashboardPage()) {
           Utils.log('Refreshing data after pushState tab switch');
@@ -2193,7 +2291,7 @@
       if (!isAllowedPage()) {
         // Navigated away from an allowed page — hide the calculator
         if (calc) calc.style.display = 'none';
-        document.body.style.marginRight = '';
+        dockUnregister();
         return;
       }
 
@@ -2209,7 +2307,7 @@
       // Calculator already exists — show/hide per hash and refresh data
       const visible = shouldShowCalculator();
       calc.style.display = visible ? '' : 'none';
-      document.body.style.marginRight = (visible && State.docked) ? '460px' : '';
+      if (visible && State.docked) { dockRegister(); } else { dockUnregister(); }
 
       if (!visible || State.frozen) return;
 
