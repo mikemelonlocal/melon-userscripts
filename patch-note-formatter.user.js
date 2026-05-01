@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Patch Note Formatter (Preserve Lists) + Full Term Normalizer + Preview Diff
 // @namespace    http://tampermonkey.net/
-// @version      1.9.0
-// @description  Formats Patch notes with bold headings and preserves lists. Normalizes alternative transcriptions to canonical terms. v1.9.0: Auditor view replaces line diff (changed words wrapped in <span data-prev=...> with CSS hover tooltip), Manage Terms gains a Simple-view table editor, SuggestionScanner runs in a Web Worker via inline Blob (no UI block on Levenshtein scans), Kendo Resilience: setEditorHtml fires change/input events to trigger CRM dirty-state for auto-save.
+// @version      1.9.1
+// @description  Formats Patch notes with bold headings and preserves lists. Normalizes alternative transcriptions to canonical terms. v1.9.1: sidebar dock toggle (pin panel to right edge, full-height, body reflows via margin-right). Includes 1.9.0: Auditor view, Simple-view terms editor, Worker-based scan, Kendo dirty-state events.
 // @match        https://thepatch.melonlocal.com/*
 // @run-at       document-end
 // @grant        none
@@ -25,6 +25,8 @@
     MAX_CHANGE_ENTRIES: 250,
     UI_POS_KEY: "patchNoteFormatter_uiPos_v1",
     UI_MIN_KEY: "patchNoteFormatter_uiMin_v1",
+    UI_DOCK_KEY: "patchNoteFormatter_uiDock_v1",
+    DOCK_WIDTH_PX: 360,
     TERMS_KEY: "patchNoteFormatter_terms_v1",
     WAIT_DEFAULT_MS: 2500,
     WAIT_POLL_MS: 60,
@@ -342,6 +344,32 @@
           width: 320px;
           font-family: sans-serif;
           overflow: hidden;
+        }
+
+        /* Sidebar dock: pin to the right edge, full viewport height. Body
+           margin-right is set in JS so the page content reflows. */
+        #patchNoteFormatterUI.pnf-docked {
+          top: 0 !important;
+          right: 0 !important;
+          bottom: 0 !important;
+          left: auto !important;
+          width: 360px !important;
+          height: 100vh !important;
+          max-height: 100vh !important;
+          border-radius: 0 !important;
+          border-right: none;
+          box-shadow: -4px 0 24px rgba(0,0,0,0.22) !important;
+        }
+        #patchNoteFormatterUI.pnf-docked .pnf-ui-title {
+          cursor: default;
+        }
+        #patchNoteFormatterUI.pnf-docked .pnf-ui-body {
+          flex: 1;
+          overflow: auto;
+        }
+        .pnf-btn-icon.pnf-btn-dock-active {
+          background: var(--pnf-cactus) !important;
+          color: #fff !important;
         }
         .pnf-ui-title {
           padding: 10px 12px;
@@ -2969,6 +2997,10 @@
   const MainUI = {
     remove() {
       const ui = document.getElementById("patchNoteFormatterUI");
+      // If we leave the dock margin behind, the page has a 360px void.
+      if (ui && ui.classList.contains("pnf-docked")) {
+        document.body.style.marginRight = "";
+      }
       if (ui) ui.remove();
       const modal = document.getElementById("patchPreviewModal");
       if (modal) modal.remove();
@@ -2990,9 +3022,10 @@
       ui.appendChild(body.container);
       document.body.appendChild(ui);
 
+      this._setupDocking(ui, title.btnDock);
       this._setupPositioning(ui);
       this._setupMinimize(ui, body.container, title.btnMin);
-      this._setupDragging(ui, title.container, title.btnMin, title.btnClose);
+      this._setupDragging(ui, title.container, title.btnMin, title.btnClose, title.btnDock);
       this._setupEventHandlers(body);
     },
 
@@ -3008,6 +3041,14 @@
       const titleBtns = document.createElement("div");
       titleBtns.className = "pnf-ui-title-btns";
 
+      const btnDock = UIComponents.createButton({
+        text: "⇲",
+        variant: "pine",
+        extraClass: "pnf-btn-icon",
+        ariaLabel: "Dock to sidebar",
+      });
+      btnDock.title = "Dock to sidebar";
+
       const btnMin = UIComponents.createButton({
         text: "–",
         variant: "pine",
@@ -3022,11 +3063,12 @@
         ariaLabel: "Close",
       });
 
+      titleBtns.appendChild(btnDock);
       titleBtns.appendChild(btnMin);
       titleBtns.appendChild(btnClose);
       container.appendChild(titleBtns);
 
-      return { container, btnMin, btnClose };
+      return { container, btnDock, btnMin, btnClose };
     },
 
     _buildBody() {
@@ -3111,8 +3153,10 @@
     },
 
     _setupPositioning(ui) {
+      // _setupDocking already ran; if it docked the panel, leave it alone.
+      if (ui.classList.contains("pnf-docked")) return;
       const savedPos = Storage.get(CONFIG.UI_POS_KEY);
-      if (savedPos?.left && savedPos?.top) {
+      if (savedPos?.left != null && savedPos?.top != null) {
         Object.assign(ui.style, {
           left: `${savedPos.left}px`,
           top: `${savedPos.top}px`,
@@ -3137,11 +3181,59 @@
       btnMin.onclick = () => setMin(!minimized);
     },
 
-    _setupDragging(ui, titleContainer, btnMin, btnClose) {
+    // Toggle the right-edge sidebar dock. Adds the .pnf-docked class (CSS
+     // pins the panel) and sets body margin-right so page content reflows.
+     // State persists in localStorage so the dock survives navigation.
+    _setupDocking(ui, btnDock) {
+      const apply = (docked) => {
+        if (docked) {
+          ui.classList.add("pnf-docked");
+          // Drop any inline left/top from a previous undocked drag so the CSS
+          // !important rules win unambiguously.
+          ui.style.left = "";
+          ui.style.top = "";
+          document.body.style.marginRight = `${CONFIG.DOCK_WIDTH_PX}px`;
+          btnDock.classList.add("pnf-btn-dock-active");
+          btnDock.textContent = "⇱";
+          btnDock.setAttribute("aria-label", "Undock from sidebar");
+          btnDock.title = "Undock from sidebar";
+        } else {
+          ui.classList.remove("pnf-docked");
+          document.body.style.marginRight = "";
+          btnDock.classList.remove("pnf-btn-dock-active");
+          btnDock.textContent = "⇲";
+          btnDock.setAttribute("aria-label", "Dock to sidebar");
+          btnDock.title = "Dock to sidebar";
+          // Restore previously saved floating position, if any.
+          const savedPos = Storage.get(CONFIG.UI_POS_KEY);
+          if (savedPos?.left != null && savedPos?.top != null) {
+            Object.assign(ui.style, {
+              left: `${savedPos.left}px`,
+              top: `${savedPos.top}px`,
+              right: "auto",
+              bottom: "auto",
+            });
+          }
+        }
+        Storage.set(CONFIG.UI_DOCK_KEY, !!docked);
+      };
+
+      const initial = !!Storage.get(CONFIG.UI_DOCK_KEY);
+      apply(initial);
+
+      btnDock.onclick = (e) => {
+        e.stopPropagation();
+        apply(!ui.classList.contains("pnf-docked"));
+      };
+    },
+
+    _setupDragging(ui, titleContainer, btnMin, btnClose, btnDock) {
       let drag = null;
 
       titleContainer.addEventListener("mousedown", (e) => {
-        if (e.target === btnMin || e.target === btnClose) return;
+        if (e.target === btnMin || e.target === btnClose || e.target === btnDock) return;
+        // Dragging is meaningless while docked — the CSS pins the panel.
+        if (ui.classList.contains("pnf-docked")) return;
         const rect = ui.getBoundingClientRect();
         drag = {
           startX: e.clientX,
