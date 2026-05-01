@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Microsoft Ads - Dismiss All Recommendations
 // @namespace    http://tampermonkey.net/
-// @version      1.12
+// @version      1.13
 // @description  Adds a "Dismiss All" button to the Microsoft Advertising recommendations page
 // @author       You
 // @match        https://ui.ads.microsoft.com/*
@@ -9,14 +9,12 @@
 // @grant        none
 // @updateURL    https://raw.githubusercontent.com/mikemelonlocal/melon-userscripts/main/microsoft-ads-dismiss-recommendations.user.js
 // @downloadURL  https://raw.githubusercontent.com/mikemelonlocal/melon-userscripts/main/microsoft-ads-dismiss-recommendations.user.js
-// @updateURL    https://raw.githubusercontent.com/mikemelonlocal/melon-userscripts/main/microsoft-ads-dismiss-recommendations.user.js
-// @downloadURL  https://raw.githubusercontent.com/mikemelonlocal/melon-userscripts/main/microsoft-ads-dismiss-recommendations.user.js
 // ==/UserScript==
 
 (function () {
   'use strict';
 
-  console.info('[DismissAll] userscript loaded (v1.12)');
+  console.info('[DismissAll] userscript loaded (v1.13)');
 
   let dismissObserver = null;
   let isRunning = false;
@@ -249,7 +247,7 @@
     btn.disabled = isRunning;
     btn.dataset.running = isRunning ? 'true' : 'false';
     btn.style.cssText =
-      'position:fixed;bottom:24px;right:24px;z-index:2147483646;' +
+      'position:fixed;bottom:24px;left:24px;z-index:2147483646;' +
       'padding:10px 18px;background:#0078d4;color:#fff;' +
       'border:none;border-radius:24px;cursor:pointer;' +
       'font-size:13px;font-weight:600;' +
