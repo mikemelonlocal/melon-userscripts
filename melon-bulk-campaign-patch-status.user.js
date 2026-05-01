@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Melon Local – Bulk Campaign Patch Status
 // @namespace    https://thepatch.melonlocal.com/
-// @version      2.0.0
-// @description  Multiselect toolbar on the Campaigns grid for bulk Active/Inactive patch status changes. SPA-aware, sequential apply with verification.
+// @version      2.1.0
+// @description  Multiselect toolbar on the Campaigns grid for bulk Active/Inactive patch status changes. SPA-aware, sequential apply with verification, name-substring filter for additive select/deselect.
 // @author       You
 // @match        https://thepatch.melonlocal.com/Agents/BudgetDetails*
 // @grant        none
@@ -96,13 +96,19 @@
         box-shadow: 0 2px 8px rgba(0,0,0,0.1);
       }
       #${TOOLBAR_ID} label { font-weight: 600; color: #333; }
-      #${TOOLBAR_ID} select {
+      #${TOOLBAR_ID} select,
+      #${TOOLBAR_ID} input[type="text"] {
         padding: 5px 8px;
         border: 1px solid #ccc;
         border-radius: 4px;
         font-size: 13px;
-        cursor: pointer;
       }
+      #${TOOLBAR_ID} select { cursor: pointer; }
+      #${TOOLBAR_ID} input[type="text"] { width: 160px; }
+      #melon-bulk-filter-add { background: #1976d2; color: #fff; }
+      #melon-bulk-filter-add:hover { background: #1256a0; }
+      #melon-bulk-filter-sub { background: #757575; color: #fff; }
+      #melon-bulk-filter-sub:hover { background: #424242; }
       .melon-bulk-btn {
         padding: 6px 14px;
         border-radius: 4px;
@@ -193,6 +199,13 @@
       <span class="sep">|</span>
       <button class="melon-bulk-btn" id="melon-bulk-selall">☑ Select All</button>
       <button class="melon-bulk-btn" id="melon-bulk-selnone">☐ Deselect All</button>
+      <span class="sep">|</span>
+      <label for="melon-bulk-filter">Name contains:</label>
+      <input type="text" id="melon-bulk-filter" placeholder="e.g. desktop" autocomplete="off" spellcheck="false" />
+      <button class="melon-bulk-btn" id="melon-bulk-filter-add" title="Check rows whose name contains the text. Existing checks stay.">+ Select matching</button>
+      <button class="melon-bulk-btn" id="melon-bulk-filter-sub" title="Uncheck rows whose name contains the text. Other checks stay.">− Deselect matching</button>
+      <span id="melon-bulk-filter-count" style="color:#888;"></span>
+      <span class="sep">|</span>
       <span id="${COUNT_ID}">0 selected</span>
       <span class="sep">|</span>
       <span style="color:#888;">Tip: <kbd>${navigator.platform.includes('Mac') ? '⌘' : 'Ctrl'}</kbd>+<kbd>A</kbd> in toolbar = Select All</span>
@@ -204,6 +217,57 @@
     toolbar.querySelector('#melon-bulk-selall').addEventListener('click', selectAll);
     toolbar.querySelector('#melon-bulk-selnone').addEventListener('click', selectNone);
     toolbar.querySelector('#melon-bulk-apply').addEventListener('click', () => onApplyClicked(table));
+
+    const filterInput = toolbar.querySelector('#melon-bulk-filter');
+    const filterAdd   = toolbar.querySelector('#melon-bulk-filter-add');
+    const filterSub   = toolbar.querySelector('#melon-bulk-filter-sub');
+    const refreshFilterCount = () => updateFilterMatchCount(table, filterInput.value);
+    filterInput.addEventListener('input', refreshFilterCount);
+    filterAdd.addEventListener('click', () => {
+      filterMatchingRows(table, filterInput.value, true);
+      refreshFilterCount();
+    });
+    filterSub.addEventListener('click', () => {
+      filterMatchingRows(table, filterInput.value, false);
+      refreshFilterCount();
+    });
+    filterInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        filterMatchingRows(table, filterInput.value, !e.shiftKey);
+        refreshFilterCount();
+      }
+    });
+  }
+
+  // ── Substring filter (additive select / subtractive deselect) ──────────────
+  function getMatchingRows(table, substring) {
+    const term = (substring || '').trim().toLowerCase();
+    if (!term) return [];
+    const rows = Array.from(table.querySelectorAll('tbody tr'));
+    return rows.filter(r => getRowName(table, r).toLowerCase().includes(term));
+  }
+
+  function filterMatchingRows(table, substring, check) {
+    const rows = getMatchingRows(table, substring);
+    let touched = 0;
+    rows.forEach(row => {
+      const cb = row.querySelector(`.${ROW_CB_CLASS}`);
+      if (cb && cb.checked !== check) {
+        cb.checked = check;
+        touched++;
+      }
+    });
+    updateCount();
+    return { matched: rows.length, touched };
+  }
+
+  function updateFilterMatchCount(table, substring) {
+    const el = document.getElementById('melon-bulk-filter-count');
+    if (!el) return;
+    const term = (substring || '').trim();
+    if (!term) { el.textContent = ''; return; }
+    el.textContent = `${getMatchingRows(table, term).length} match`;
   }
 
   // ── Header + per-row checkboxes (idempotent) ───────────────────────────────
