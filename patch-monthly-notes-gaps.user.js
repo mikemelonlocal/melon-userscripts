@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Patch Monthly Notes Gaps
 // @namespace    http://tampermonkey.net/
-// @version      1.0.8
+// @version      1.0.9
 // @description  On the Patch Calls grid, identify months missing a final-status call (Completed, Canceled, Agent No Show) for a given year by title, and bulk-archive calls for that year by title. Uses the Melon color palette and only appears on the Calls tab.
 // @author       Melon Local
 // @match        https://thepatch.melonlocal.com/Agents/Dashboard/*
@@ -20,7 +20,7 @@
 
   // Keep CURRENT_VERSION in sync with @version in the metadata block above.
   // VERSION is the human-readable tag used in console logs and window export.
-  const CURRENT_VERSION = "1.0.8";
+  const CURRENT_VERSION = "1.0.9";
   const VERSION = `monthly-notes-gaps-v${CURRENT_VERSION}`;
 
   // -----------------------------
@@ -33,6 +33,9 @@
   const ARCHIVE_BUTTON_WAIT_MS = 2000;
   const ARCHIVE_BUTTON_POLL_MS = 50;
   const TOAST_TIMEOUT_MS = 8000;
+  const DOCK_WIDTH_PX = 340;
+  // CSS class applied to the panel when docked. Drag handler bails on this.
+  const DOCKED_CLASS = "pmng-docked";
 
   // Auto-update: lightweight in-panel notice that complements Tampermonkey's
   // own update mechanism (driven by @updateURL / @downloadURL above).
@@ -42,6 +45,7 @@
 
   const UI_POS_KEY = "patchMonthlyNotesGaps_uiPos_v1";
   const UI_MIN_KEY = "patchMonthlyNotesGaps_uiMin_v1";
+  const UI_DOCK_KEY = "patchMonthlyNotesGaps_uiDocked_v1";
   const UPDATE_CHECK_KEY = "patchMonthlyNotesGaps_lastUpdateCheck_v1";
   const UPDATE_LATEST_KEY = "patchMonthlyNotesGaps_latestVersion_v1";
 
@@ -205,6 +209,23 @@
     }
   }
 
+  function saveUiDocked(docked) {
+    try {
+      localStorage.setItem(UI_DOCK_KEY, docked ? "1" : "0");
+    } catch (e) {
+      console.warn("[PatchMonthlyNotesGaps] Failed to save UI dock:", e);
+    }
+  }
+
+  function loadUiDocked() {
+    try {
+      return localStorage.getItem(UI_DOCK_KEY) === "1";
+    } catch (e) {
+      console.warn("[PatchMonthlyNotesGaps] Failed to load UI dock:", e);
+      return false;
+    }
+  }
+
   function clamp(n, min, max) {
     return Math.max(min, Math.min(max, n));
   }
@@ -218,6 +239,8 @@
 
     const onMouseDown = (e) => {
       if (e.button !== 0) return;
+      // Don't drag when docked — the panel is pinned to the viewport edge.
+      if (box.classList.contains(DOCKED_CLASS)) return;
       // Don't start a drag when clicking interactive controls inside the handle.
       if (e.target.closest("button, input, select, textarea, a")) return;
 
@@ -514,10 +537,29 @@
     minBtn.onmouseenter = () => { minBtn.style.background = MELON_COLORS.pineHover; };
     minBtn.onmouseleave = () => { minBtn.style.background = MELON_COLORS.pine; };
 
+    // Dock button — pins the panel as a right-side rail and shifts page content
+    // left via document.body.style.marginRight.
+    const dockBtn = document.createElement("button");
+    dockBtn.style.padding = "4px 10px";
+    dockBtn.style.margin = "0";
+    dockBtn.style.border = "none";
+    dockBtn.style.borderRadius = "999px";
+    dockBtn.style.cursor = "pointer";
+    dockBtn.style.fontSize = "11px";
+    dockBtn.style.fontWeight = "600";
+    dockBtn.style.color = "#FFFFFF";
+    dockBtn.style.background = MELON_COLORS.pine;
+    dockBtn.style.transition = "background 0.15s ease";
+    dockBtn.textContent = "Dock";
+    dockBtn.title = "Dock panel to the right sidebar";
+    dockBtn.onmouseenter = () => { dockBtn.style.background = MELON_COLORS.pineHover; };
+    dockBtn.onmouseleave = () => { dockBtn.style.background = MELON_COLORS.pine; };
+
     const headerBtns = document.createElement("div");
     headerBtns.style.display = "flex";
     headerBtns.style.gap = "6px";
     headerBtns.style.alignItems = "center";
+    headerBtns.appendChild(dockBtn);
     headerBtns.appendChild(minBtn);
 
     headerRow.appendChild(header);
@@ -860,6 +902,68 @@
       applyMinState();
     };
 
+    // Dock behavior (persisted). When docked, the panel becomes a full-height
+    // right-side rail and the page content shifts left to make room.
+    let docked = loadUiDocked();
+    // Remember the floating position so undocking can restore it.
+    let savedFloatPos = null;
+
+    const applyDockState = () => {
+      if (docked) {
+        // Snapshot current floating position before pinning to the edge.
+        if (!box.classList.contains(DOCKED_CLASS)) {
+          const rect = box.getBoundingClientRect();
+          savedFloatPos = { left: rect.left, top: rect.top };
+        }
+        box.classList.add(DOCKED_CLASS);
+        box.style.left = "auto";
+        box.style.top = "0";
+        box.style.right = "0";
+        box.style.bottom = "0";
+        box.style.width = `${DOCK_WIDTH_PX}px`;
+        box.style.height = "100vh";
+        box.style.maxHeight = "100vh";
+        box.style.borderRadius = "0";
+        box.style.boxShadow = "-4px 0 24px rgba(0,0,0,0.18)";
+        // Shift the host page content left so the dock doesn't cover it.
+        document.body.style.marginRight = `${DOCK_WIDTH_PX}px`;
+        dockBtn.textContent = "Undock";
+        dockBtn.title = "Return to floating panel";
+      } else {
+        box.classList.remove(DOCKED_CLASS);
+        box.style.right = "auto";
+        box.style.bottom = "auto";
+        box.style.width = "";
+        box.style.height = "";
+        box.style.maxHeight = "";
+        box.style.borderRadius = "8px";
+        box.style.boxShadow = "0 4px 10px rgba(0,0,0,0.15)";
+        document.body.style.marginRight = "";
+        // Restore the floating position the user had before docking, falling
+        // back to the persisted position or the default bottom-right.
+        const restore = savedFloatPos || loadUiPos();
+        if (restore && typeof restore.left === "number" && typeof restore.top === "number") {
+          box.style.left = `${restore.left}px`;
+          box.style.top = `${restore.top}px`;
+        } else {
+          box.style.left = "auto";
+          box.style.top = "auto";
+          box.style.right = "20px";
+          box.style.bottom = "20px";
+        }
+        dockBtn.textContent = "Dock";
+        dockBtn.title = "Dock panel to the right sidebar";
+      }
+      saveUiDocked(docked);
+    };
+
+    dockBtn.onclick = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      docked = !docked;
+      applyDockState();
+    };
+
     // Keyboard shortcut: ESC to toggle minimize.
     escKeydownHandler = (e) => {
       if (e.key !== "Escape" || e.ctrlKey || e.altKey || e.metaKey) return;
@@ -874,6 +978,7 @@
     document.addEventListener("keydown", escKeydownHandler);
 
     applyMinState();
+    applyDockState();
 
     // Kick off a non-blocking update check. If a newer version is published
     // at REMOTE_SCRIPT_URL, surface an in-panel banner. Tampermonkey itself
@@ -895,6 +1000,11 @@
     }
     if (window.__patchMonthlyNotesGapsToast) {
       delete window.__patchMonthlyNotesGapsToast;
+    }
+    // Always clear the body margin we may have set while docked, so leaving
+    // the Calls view doesn't leave the host page squashed.
+    if (document.body && document.body.style.marginRight) {
+      document.body.style.marginRight = "";
     }
   }
 
