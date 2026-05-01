@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Patch Note Formatter (Preserve Lists) + Full Term Normalizer + Preview Diff
 // @namespace    http://tampermonkey.net/
-// @version      1.9.1
-// @description  Formats Patch notes with bold headings and preserves lists. Normalizes alternative transcriptions to canonical terms. v1.9.1: sidebar dock toggle (pin panel to right edge, full-height, body reflows via margin-right). Includes 1.9.0: Auditor view, Simple-view terms editor, Worker-based scan, Kendo dirty-state events.
+// @version      1.9.2
+// @description  Formats Patch notes with bold headings and preserves lists. Normalizes alternative transcriptions to canonical terms. v1.9.2: dock now coordinates with other Melon Local userscripts via shared body data-attribute, so multiple docked panels stack horizontally instead of overlapping. Includes 1.9.1: sidebar dock toggle. 1.9.0: Auditor view, Simple-view terms editor, Worker-based scan, Kendo dirty-state events.
 // @match        https://thepatch.melonlocal.com/*
 // @run-at       document-end
 // @grant        none
@@ -32,6 +32,80 @@
     WAIT_POLL_MS: 60,
     EDITOR_SLEEP_MS: 250,
   };
+
+  // Stable id this panel uses with the shared dock coordinator.
+  const DOCK_ID = "patch-note-formatter";
+
+  // =============================
+  // SHARED DOCK MANAGER
+  // Coordinates multiple Melon Local userscripts that dock to the right edge.
+  // Communicates across scripts (including across @grant sandbox boundaries)
+  // via a JSON list on <body data-melon-local-docks="..."> and a custom DOM
+  // event. document is shared regardless of grant mode, so this works between
+  // sandboxed and page-context scripts. Each script keeps its own onLayout
+  // callbacks locally; only {id, width} crosses the JSON channel.
+  // =============================
+  const DockManager = (function createMelonDockManager() {
+    const ATTR = "data-melon-local-docks";
+    const EVENT = "melon-local-docks-changed";
+    const localCallbacks = new Map();
+
+    const readSharedDocks = () => {
+      try {
+        const raw = document.body && document.body.getAttribute(ATTR);
+        return raw ? JSON.parse(raw) : [];
+      } catch (e) {
+        return [];
+      }
+    };
+
+    const writeSharedDocks = (arr) => {
+      if (!document.body) return;
+      document.body.setAttribute(ATTR, JSON.stringify(arr));
+      document.dispatchEvent(new CustomEvent(EVENT));
+    };
+
+    const reflow = () => {
+      const docks = readSharedDocks();
+      let total = 0;
+      for (const d of docks) total += d.width;
+      try {
+        document.body.style.marginRight = total ? `${total}px` : "";
+      } catch (e) { /* body may not exist in edge cases */ }
+
+      // First-registered panel keeps right:0 (rightmost slot); each subsequent
+      // panel is pushed leftward by the cumulative width of earlier panels.
+      let offset = 0;
+      for (const d of docks) {
+        const cb = localCallbacks.get(d.id);
+        if (cb) {
+          try { cb(offset, total); } catch (e) {
+            console.warn("[MelonDockManager] onLayout callback threw:", e);
+          }
+        }
+        offset += d.width;
+      }
+    };
+
+    document.addEventListener(EVENT, reflow);
+
+    return {
+      register(id, width, onLayout) {
+        localCallbacks.set(id, onLayout);
+        const docks = readSharedDocks().filter((d) => d.id !== id);
+        docks.push({ id, width });
+        writeSharedDocks(docks);
+      },
+      unregister(id) {
+        localCallbacks.delete(id);
+        const docks = readSharedDocks().filter((d) => d.id !== id);
+        writeSharedDocks(docks);
+      },
+      has(id) { return localCallbacks.has(id); },
+      listLocal() { return [...localCallbacks.keys()]; },
+      listShared() { return readSharedDocks().map((d) => d.id); }
+    };
+  })();
 
   // Private-Use-Area control chars used as sentinels around each
   // normalization replacement. They survive HTML escaping (escapeHtml only
@@ -346,11 +420,12 @@
           overflow: hidden;
         }
 
-        /* Sidebar dock: pin to the right edge, full viewport height. Body
-           margin-right is set in JS so the page content reflows. */
+        /* Sidebar dock: pin full viewport height. The right offset and the
+           body margin-right are managed by the shared DockManager (see
+           top of this IIFE) so multiple docked Melon Local userscripts
+           stack horizontally instead of overlapping. */
         #patchNoteFormatterUI.pnf-docked {
           top: 0 !important;
-          right: 0 !important;
           bottom: 0 !important;
           left: auto !important;
           width: 360px !important;
@@ -2997,10 +3072,11 @@
   const MainUI = {
     remove() {
       const ui = document.getElementById("patchNoteFormatterUI");
-      // If we leave the dock margin behind, the page has a 360px void.
-      if (ui && ui.classList.contains("pnf-docked")) {
-        document.body.style.marginRight = "";
-      }
+      // Release our slot in the shared dock manager. It recomputes
+      // body.marginRight to the sum of remaining docked widths, so any
+      // sibling panels that are still docked stay properly laid out —
+      // we don't yank the margin out from under them.
+      try { DockManager.unregister(DOCK_ID); } catch (e) { /* best-effort */ }
       if (ui) ui.remove();
       const modal = document.getElementById("patchPreviewModal");
       if (modal) modal.remove();
@@ -3182,7 +3258,9 @@
     },
 
     // Toggle the right-edge sidebar dock. Adds the .pnf-docked class (CSS
-     // pins the panel) and sets body margin-right so page content reflows.
+     // pins the panel full-height) and registers with the shared DockManager
+     // so body margin-right and the panel's right offset cooperate with any
+     // other docked Melon Local userscripts on the page.
      // State persists in localStorage so the dock survives navigation.
     _setupDocking(ui, btnDock) {
       const apply = (docked) => {
@@ -3192,14 +3270,20 @@
           // !important rules win unambiguously.
           ui.style.left = "";
           ui.style.top = "";
-          document.body.style.marginRight = `${CONFIG.DOCK_WIDTH_PX}px`;
+          // Register with the coordinator. It owns body.marginRight and tells
+          // us our right-offset (0 if we're the only/first docked panel).
+          DockManager.register(DOCK_ID, CONFIG.DOCK_WIDTH_PX, (offset) => {
+            ui.style.right = `${offset}px`;
+          });
           btnDock.classList.add("pnf-btn-dock-active");
           btnDock.textContent = "⇱";
           btnDock.setAttribute("aria-label", "Undock from sidebar");
           btnDock.title = "Undock from sidebar";
         } else {
+          // Release our slot so siblings reflow without our width.
+          DockManager.unregister(DOCK_ID);
+          ui.style.right = "";
           ui.classList.remove("pnf-docked");
-          document.body.style.marginRight = "";
           btnDock.classList.remove("pnf-btn-dock-active");
           btnDock.textContent = "⇲";
           btnDock.setAttribute("aria-label", "Dock to sidebar");
