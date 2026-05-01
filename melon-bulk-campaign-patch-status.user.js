@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Melon Local – Bulk Campaign Patch Status
 // @namespace    https://thepatch.melonlocal.com/
-// @version      3.0.2
+// @version      3.0.3
 // @description  Bulk Active/Inactive campaign patch status tool. Sticky collapsible toolbar, pill look-ahead counts, row processing spinner, undo/rollback buffer, Action FAB, budget-status guard, polled verification.
 // @author       You
 // @match        https://thepatch.melonlocal.com/Agents/BudgetDetails*
@@ -311,8 +311,7 @@
     const toolbar     = document.createElement('div');
     toolbar.id        = TOOLBAR_ID;
     toolbar.tabIndex  = -1;
-    const startCollapsed = localStorage.getItem(COLLAPSE_STORAGE_KEY) !== 'open';
-    if (startCollapsed) toolbar.classList.add('collapsed');
+    toolbar.classList.add('collapsed');
 
     const mac = navigator.platform.includes('Mac');
     toolbar.innerHTML = `
@@ -320,7 +319,7 @@
         <span class="melon-title">🍈 Bulk Campaign Patch</span>
         <span id="${HEADER_COUNT_ID}" class="empty">0 selected</span>
         <span class="melon-spacer"></span>
-        <button id="${COLLAPSE_BTN_ID}" type="button">${startCollapsed ? 'Expand ▼' : 'Collapse ▲'}</button>
+        <button id="${COLLAPSE_BTN_ID}" type="button">Expand ▼</button>
       </div>
       <div class="melon-bulk-body">
         <label>Bulk Patch Status:</label>
@@ -915,5 +914,5 @@
   new MutationObserver(debouncedEnsure).observe(document.body, { childList: true, subtree: true });
 
   ensureUI();
-  console.log('[Melon Bulk] v3.0.2 ready.');
+  console.log('[Melon Bulk] v3.0.3 ready.');
 })();
