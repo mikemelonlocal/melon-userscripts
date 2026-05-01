@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Patch Monthly Auto-Creator
 // @namespace    http://tampermonkey.net/
-// @version      1.4.3
+// @version      1.4.4
 // @description  Create next month's Monthly call based on the latest one on the current agent's Calls tab
 // @match        https://thepatch.melonlocal.com/Agents/Dashboard/*
 // @match        https://thepatch.melonlocal.com/agents/dashboard/*
@@ -116,19 +116,39 @@
     style.id = CONFIG.DOM_IDS.STYLES;
     // !important throughout so we beat any host stylesheet without copying
     // computed styles off another button at runtime.
-    // Strategy: the button gets Patch's own "btn melon-green" classes so
-    // layout (font, padding, height, border-radius) matches the page exactly.
-    // .melon-auto-create-btn only overrides the colors using BRAND tokens
-    // and adds the spacing/state polish — no layout values redefined here.
+    // Strategy: the button gets Patch's "btn melon-green" classes for base
+    // styling, then .melon-auto-create-btn layers on:
+    //   1. Color overrides from BRAND tokens (Cactus/Pine/Alpine).
+    //   2. Layout values sourced from --mac-* custom properties, which
+    //      syncStyleVarsFrom() populates by reading the live New Call
+    //      button's computed style. Necessary because the .addNewCall
+    //      selector on Patch's button gives it more specific padding/height
+    //      values than .btn.melon-green alone — so we have to copy the
+    //      rendered values, not just reuse the base class.
+    //   3. Fallbacks on every var() in case the New Call button isn't
+    //      mounted yet when the user clicks our button.
     style.textContent = `
       .${CONFIG.CSS_CLASSES.AUTO_BTN} {
         margin-right: 8px !important;
         white-space: nowrap !important;
         cursor: pointer !important;
+        letter-spacing: 0.02em !important;
+        /* Colors from BRAND */
         background: ${BRAND.Cactus} !important;
         border-color: ${BRAND.Cactus} !important;
         color: ${BRAND.Alpine} !important;
-        letter-spacing: 0.02em !important;
+        /* Layout sourced from New Call at runtime via custom properties */
+        padding: var(--mac-padding, 6px 16px) !important;
+        height: var(--mac-height, auto) !important;
+        min-height: var(--mac-min-height, 0) !important;
+        font-family: var(--mac-font-family, inherit) !important;
+        font-size: var(--mac-font-size, 14px) !important;
+        font-weight: var(--mac-font-weight, 600) !important;
+        line-height: var(--mac-line-height, 1.5) !important;
+        border-radius: var(--mac-border-radius, 999px) !important;
+        border-width: var(--mac-border-width, 1px) !important;
+        border-style: solid !important;
+        box-sizing: border-box !important;
         transition: background-color 120ms ease, border-color 120ms ease, box-shadow 120ms ease !important;
       }
       .${CONFIG.CSS_CLASSES.AUTO_BTN}:hover {
@@ -167,6 +187,44 @@
     `;
     document.head.appendChild(style);
     logger.debug("Stylesheet injected");
+  }
+
+  /**
+   * Read the live computed style off the reference (New Call) button and
+   * publish the layout-affecting values to :root as --mac-* custom properties.
+   * The .melon-auto-create-btn rule consumes these via var(), so the new
+   * button matches the page's button geometry exactly — even when Patch
+   * uses a more specific selector (e.g. .btn.melon-green.addNewCall) with
+   * different padding/height than .btn.melon-green alone.
+   */
+  function syncStyleVarsFrom(referenceBtn) {
+    if (!referenceBtn) return;
+    const cs = window.getComputedStyle(referenceBtn);
+    const root = document.documentElement.style;
+
+    const setVar = (name, value) => {
+      if (value && value !== "none" && value !== "auto" && value !== "normal") {
+        root.setProperty(name, value);
+      }
+    };
+
+    // Padding as a single shorthand keeps it atomic.
+    root.setProperty(
+      "--mac-padding",
+      `${cs.paddingTop} ${cs.paddingRight} ${cs.paddingBottom} ${cs.paddingLeft}`
+    );
+    setVar("--mac-height", cs.height);
+    setVar("--mac-min-height", cs.minHeight);
+    setVar("--mac-font-family", cs.fontFamily);
+    setVar("--mac-font-size", cs.fontSize);
+    setVar("--mac-font-weight", cs.fontWeight);
+    setVar("--mac-line-height", cs.lineHeight);
+    setVar("--mac-border-radius", cs.borderRadius);
+    setVar("--mac-border-width", cs.borderTopWidth);
+
+    logger.debug(
+      `Synced layout vars from New Call: ${cs.height} tall, padding ${cs.paddingTop} ${cs.paddingRight}, font ${cs.fontSize}/${cs.lineHeight}`
+    );
   }
 
   // ---------- Notification system ----------
@@ -819,6 +877,11 @@
     }
 
     if (!newCallBtn || !newCallBtn.parentElement) return;
+
+    // Pull live layout values off New Call into CSS custom properties so
+    // our button matches its height/padding/font even when Patch uses a
+    // selector more specific than .btn.melon-green for it.
+    syncStyleVarsFrom(newCallBtn);
 
     const btn = document.createElement("button");
     btn.id = CONFIG.DOM_IDS.AUTO_BTN;
