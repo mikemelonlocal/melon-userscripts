@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Daily Cap Calculator - Melon Local (Enhanced)
 // @namespace    https://thepatch.melonlocal.com/
-// @version      3.7.1
+// @version      3.7.2
 // @description  Paces budgets evenly through end of month. Auto-fills from page data. Refresh + Freeze. Enhanced with auto-save, export/import, keyboard shortcuts, and improved UX.
 // @author       Melon Local
 // @match        https://thepatch.melonlocal.com/*
@@ -400,6 +400,7 @@
     /* Budget Rows */
     .dcc-budget-row {
       display: flex;
+      flex-wrap: wrap;      /* allows CPE sub-row to drop to a second line */
       gap: 7px;
       align-items: center;
       margin-bottom: 6px;
@@ -734,31 +735,40 @@
     }
 
     /* ── Per-budget CPE override (shown when event cap toggle is on) ────── */
+    /* Per-budget CPE sub-row — sits on its own wrapped line inside the budget row */
     .dcc-budget-cpe-wrap {
       display: none;
-      flex-shrink: 0;
+      order: 10;            /* always after the main row controls */
+      flex-basis: 100%;     /* force onto a new line when visible */
+      align-items: center;
+      gap: 6px;
+      padding-left: 10px;
     }
 
     .dcc-budget-cpe-wrap.visible {
-      display: inline-flex;
+      display: flex;
     }
 
-    /* No visible label — placeholder text + amber border identify the field */
+    .dcc-budget-cpe-label {
+      font-size: 10px;
+      font-weight: 700;
+      color: #b45309;
+      white-space: nowrap;
+    }
+
     .dcc-budget-cpe-wrap input {
-      width: 52px;
-      padding: 5px 5px;
+      width: 110px;
+      padding: 5px 8px;
       border: 1.5px solid #fcd34d;
       border-radius: 5px;
       font-size: 11px;
       color: #92400e;
       background: #fffbeb;
-      text-align: center;
       transition: border-color 0.2s;
     }
 
     .dcc-budget-cpe-wrap input::placeholder {
-      color: #d97706;
-      font-weight: 700;
+      color: #c8862a;
     }
 
     .dcc-budget-cpe-wrap input:focus {
@@ -1591,27 +1601,30 @@
         Storage.autoSave();
       });
 
-      // Per-budget CPE override — visible only when the product event toggle is on.
-      // No visible label: the amber border + "$/evt" placeholder identify it.
-      const cpeWrap = document.createElement('div');
-      cpeWrap.className = 'dcc-budget-cpe-wrap' + (showCpe ? ' visible' : '');
-      const cpeInput = document.createElement('input');
-      cpeInput.type = 'number';
-      cpeInput.placeholder = '$/evt';
-      cpeInput.title = 'Cost per event for this budget type — leave blank to use the product-level default';
-      cpeInput.value = cpe || '';
-      cpeInput.min = '0';
-      cpeInput.step = '0.01';
-      cpeInput.className = 'calc-budget-cpe';
-      cpeInput.addEventListener('input', () => Storage.autoSave());
-      cpeWrap.append(cpeInput);
-
       const removeBtn = document.createElement('button');
       removeBtn.className = 'dcc-remove-btn';
       removeBtn.innerHTML = '&times;';
       removeBtn.title = 'Remove budget';
 
-      row.append(descInput, dollar, capInput, wkLabel, cpeWrap, removeBtn);
+      // Per-budget CPE override — wraps to its own line (flex-basis:100%) when visible.
+      // Appended after removeBtn so order:10 in CSS is redundant but kept for safety.
+      const cpeWrap = document.createElement('div');
+      cpeWrap.className = 'dcc-budget-cpe-wrap' + (showCpe ? ' visible' : '');
+      const cpeLbl = document.createElement('span');
+      cpeLbl.className = 'dcc-budget-cpe-label';
+      cpeLbl.textContent = '$/evt override:';
+      const cpeInput = document.createElement('input');
+      cpeInput.type = 'number';
+      cpeInput.placeholder = 'e.g. 4.55  (blank = use product default)';
+      cpeInput.title = 'Cost per event for this budget type — leave blank to inherit the product-level default';
+      cpeInput.value = cpe || '';
+      cpeInput.min = '0';
+      cpeInput.step = '0.01';
+      cpeInput.className = 'calc-budget-cpe';
+      cpeInput.addEventListener('input', () => Storage.autoSave());
+      cpeWrap.append(cpeLbl, cpeInput);
+
+      row.append(descInput, dollar, capInput, wkLabel, removeBtn, cpeWrap);
       listEl.appendChild(row);
     },
 
