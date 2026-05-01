@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Daily Cap Calculator - Melon Local (Enhanced)
 // @namespace    https://thepatch.melonlocal.com/
-// @version      3.7.6
+// @version      3.7.7
 // @description  Paces budgets evenly through end of month. Auto-fills from page data. Refresh + Freeze. Enhanced with auto-save, export/import, keyboard shortcuts, and improved UX.
 // @author       Melon Local
 // @match        https://thepatch.melonlocal.com/*
@@ -2525,10 +2525,20 @@
     // Setup hash change listener for tab switching
     setupHashChangeListener();
 
-    // Check initial hash and hide if not allowed
+    // Check initial hash and hide if not allowed.
+    // IMPORTANT: also release the dock slot. createCalculator() restores
+    // State.docked from localStorage and calls UI.applyDockState() above,
+    // which registers with the shared dock manager. If the current hash
+    // turns out to hide the panel (e.g. landing on a Dashboard page with
+    // #calls, which is allowed but not advertising/melonmax), we need to
+    // unregister so the manager doesn't reserve 460px of body marginRight
+    // for an invisible panel. The pushState handler in
+    // setupNavigationListener will dockRegister again when the user
+    // navigates to a hash that re-shows the calculator.
     if (!shouldShowCalculator()) {
       Utils.log('Initial hash not allowed - hiding calculator');
       State.dom.calculator.style.display = 'none';
+      dockUnregister();
     }
   }
 
