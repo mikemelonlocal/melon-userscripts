@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Daily Cap Calculator - Melon Local (Enhanced)
 // @namespace    https://thepatch.melonlocal.com/
-// @version      3.7.5
+// @version      3.7.6
 // @description  Paces budgets evenly through end of month. Auto-fills from page data. Refresh + Freeze. Enhanced with auto-save, export/import, keyboard shortcuts, and improved UX.
 // @author       Melon Local
 // @match        https://thepatch.melonlocal.com/*
@@ -120,21 +120,17 @@
         document.body.style.marginRight = total ? total + 'px' : '';
       } catch (e) { /* body may not exist in edge cases */ }
 
-      // Each id's right-offset is the sum of widths AFTER its slot.
-      // Walking in reverse builds the cumulative-from-the-right value cheaply.
-      const offsets = new Map();
-      let cumulative = 0;
-      for (let i = docks.length - 1; i >= 0; i--) {
-        offsets.set(docks[i].id, cumulative);
-        cumulative += docks[i].width;
-      }
-      for (const [id, cb] of localCallbacks) {
-        const offset = offsets.get(id);
-        if (typeof offset === 'number') {
+      // First-registered panel keeps right:0 (rightmost slot); each subsequent
+      // panel is pushed leftward by the cumulative width of earlier panels.
+      let offset = 0;
+      for (const d of docks) {
+        const cb = localCallbacks.get(d.id);
+        if (cb) {
           try { cb(offset, total); } catch (e) {
             console.warn('[MelonDockManager] onLayout callback threw:', e);
           }
         }
+        offset += d.width;
       }
     };
 
