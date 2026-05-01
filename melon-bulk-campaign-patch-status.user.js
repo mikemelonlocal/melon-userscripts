@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Melon Local – Bulk Campaign Patch Status
 // @namespace    https://thepatch.melonlocal.com/
-// @version      2.3.0
-// @description  Multiselect toolbar on the Campaigns grid for bulk Active/Inactive patch status changes. Collapsible sticky toolbar, polled status verification, audit-selection isolation view, and Melon brand-colored progress.
+// @version      2.4.0
+// @description  Multiselect toolbar on the Campaigns grid for bulk Active/Inactive patch status changes. Collapsible sticky toolbar, polled status verification, audit-selection isolation view, Melon brand-colored progress, and multipronged device/product preset filters.
 // @author       You
 // @match        https://thepatch.melonlocal.com/Agents/BudgetDetails*
 // @grant        none
@@ -36,6 +36,26 @@
   // Melon Local brand colors.
   const BRAND_ACTIVE  = '#6C2126';
   const BRAND_SUCCESS = '#47B74F';
+
+  // ── Preset filter definitions ──────────────────────────────────────────────
+  // terms: array of strings — row name must contain ANY of them to match.
+  const PRESET_DEVICES = [
+    { key: 'desktop', label: 'Desktop', terms: ['desktop'] },
+    { key: 'mobile',  label: 'Mobile',  terms: ['mobile']  },
+  ];
+  const PRESET_PRODUCTS = [
+    { key: 'auto',    label: 'Auto',    terms: ['auto'] },
+    { key: 'home',    label: 'Home',    terms: ['home'] },
+    { key: 'renters', label: 'Renters', terms: ['renters'] },
+    { key: 'condo',   label: 'Condo',   terms: ['condo'] },
+    { key: 'branded', label: 'Branded', terms: ['brand'] },
+    { key: 'fire',    label: 'Fire',    terms: ['home', 'renters', 'auto'] },
+    { key: 'quote',   label: 'Quote',   terms: ['auto', '004'] },
+  ];
+
+  // Active preset state — plain sets of keys, mutated in-place.
+  const activeDevices  = new Set();
+  const activeProducts = new Set();
 
   // ── Debounce helper ────────────────────────────────────────────────────────
   function debounce(fn, ms) {
@@ -156,6 +176,46 @@
         padding-top: 12px;
       }
       #${TOOLBAR_ID}.collapsed .melon-bulk-body { display: none; }
+      .melon-preset-row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        flex-wrap: wrap;
+        width: 100%;
+      }
+      .melon-preset-row .melon-preset-label {
+        font-weight: 600;
+        color: #555;
+        font-size: 12px;
+        min-width: 52px;
+      }
+      .melon-preset-pill {
+        padding: 3px 11px;
+        border-radius: 12px;
+        border: 1.5px solid #ccc;
+        background: #f9f9f9;
+        font-size: 12px;
+        font-weight: 600;
+        cursor: pointer;
+        color: #444;
+        transition: background 0.15s, border-color 0.15s, color 0.15s;
+      }
+      .melon-preset-pill:hover { border-color: #aaa; background: #f0f0f0; }
+      .melon-preset-pill.active {
+        background: ${BRAND_ACTIVE};
+        border-color: ${BRAND_ACTIVE};
+        color: #fff;
+      }
+      .melon-preset-pill.device.active {
+        background: #1976d2;
+        border-color: #1976d2;
+        color: #fff;
+      }
+      #melon-preset-count { color: #888; font-size: 12px; font-style: italic; }
+      #melon-preset-add   { background: ${BRAND_SUCCESS}; color: #fff; }
+      #melon-preset-add:hover { background: #379b3d; }
+      #melon-preset-sub   { background: #757575; color: #fff; }
+      #melon-preset-sub:hover { background: #424242; }
       #${TOOLBAR_ID} label { font-weight: 600; color: #333; }
       #${TOOLBAR_ID} select,
       #${TOOLBAR_ID} input[type="text"] {
@@ -317,6 +377,18 @@
         <span id="${COUNT_ID}">0 selected</span>
         <span class="sep">|</span>
         <span style="color:#888;">Tip: <kbd>${navigator.platform.includes('Mac') ? '⌘' : 'Ctrl'}</kbd>+<kbd>A</kbd> in toolbar = Select All</span>
+        <div class="melon-preset-row" style="margin-top:8px;">
+          <span class="melon-preset-label">Device:</span>
+          ${PRESET_DEVICES.map(d => `<button class="melon-preset-pill device" data-preset-group="device" data-preset-key="${d.key}">${d.label}</button>`).join('')}
+          <span class="sep" style="margin:0 4px;">|</span>
+          <span class="melon-preset-label">Product:</span>
+          ${PRESET_PRODUCTS.map(p => `<button class="melon-preset-pill product" data-preset-group="product" data-preset-key="${p.key}">${p.label}</button>`).join('')}
+        </div>
+        <div class="melon-preset-row" style="margin-top:6px;">
+          <button class="melon-bulk-btn" id="melon-preset-add" disabled>+ Select preset</button>
+          <button class="melon-bulk-btn" id="melon-preset-sub" disabled>− Deselect preset</button>
+          <span id="melon-preset-count"></span>
+        </div>
       </div>
     `;
 
@@ -340,6 +412,25 @@
         if (e.target.id !== COLLAPSE_BTN_ID) return;
       }
       toggleCollapsed();
+    });
+
+    // Preset pill toggles.
+    toolbar.querySelectorAll('.melon-preset-pill').forEach(pill => {
+      pill.addEventListener('click', () => {
+        const group = pill.dataset.presetGroup;
+        const key   = pill.dataset.presetKey;
+        const set   = group === 'device' ? activeDevices : activeProducts;
+        if (set.has(key)) { set.delete(key); pill.classList.remove('active'); }
+        else              { set.add(key);    pill.classList.add('active'); }
+        updatePresetCount(currentTable());
+      });
+    });
+
+    toolbar.querySelector('#melon-preset-add').addEventListener('click', () => {
+      applyPreset(currentTable(), true);
+    });
+    toolbar.querySelector('#melon-preset-sub').addEventListener('click', () => {
+      applyPreset(currentTable(), false);
     });
 
     const filterInput = toolbar.querySelector('#melon-bulk-filter');
@@ -392,6 +483,52 @@
     const term = (substring || '').trim();
     if (!term) { el.textContent = ''; return; }
     el.textContent = `${getMatchingRows(table, term).length} match`;
+  }
+
+  // ── Preset filter (device × product intersection) ─────────────────────────
+  // A row matches if it satisfies both the device constraint AND the product
+  // constraint. Within each constraint, matching is OR across active keys.
+  // If no keys are active for a tier, that tier is unconstrained.
+  function rowMatchesPresets(table, row) {
+    const name = getRowName(table, row).toLowerCase();
+
+    const deviceOk = activeDevices.size === 0 || [...activeDevices].some(key => {
+      const def = PRESET_DEVICES.find(d => d.key === key);
+      return def && def.terms.some(t => name.includes(t));
+    });
+
+    const productOk = activeProducts.size === 0 || [...activeProducts].some(key => {
+      const def = PRESET_PRODUCTS.find(p => p.key === key);
+      return def && def.terms.some(t => name.includes(t));
+    });
+
+    return deviceOk && productOk;
+  }
+
+  function getPresetMatchingRows(table) {
+    if (activeDevices.size === 0 && activeProducts.size === 0) return [];
+    return Array.from(table.querySelectorAll('tbody tr'))
+      .filter(r => rowMatchesPresets(table, r));
+  }
+
+  function updatePresetCount(table) {
+    const countEl  = document.getElementById('melon-preset-count');
+    const addBtn   = document.getElementById('melon-preset-add');
+    const subBtn   = document.getElementById('melon-preset-sub');
+    const hasFilter = activeDevices.size > 0 || activeProducts.size > 0;
+    const n = hasFilter ? getPresetMatchingRows(table).length : 0;
+    if (countEl) countEl.textContent = hasFilter ? `${n} match` : '';
+    if (addBtn)  addBtn.disabled  = !hasFilter;
+    if (subBtn)  subBtn.disabled  = !hasFilter;
+  }
+
+  function applyPreset(table, check) {
+    const rows = getPresetMatchingRows(table);
+    rows.forEach(row => {
+      const cb = row.querySelector(`.${ROW_CB_CLASS}`);
+      if (cb && cb.checked !== check) cb.checked = check;
+    });
+    updateCount();
   }
 
   // ── Header + per-row checkboxes (idempotent) ───────────────────────────────
@@ -687,5 +824,5 @@
   observer.observe(document.body, { childList: true, subtree: true });
 
   ensureUI();
-  console.log('[Melon Bulk] v2.3.0 ready.');
+  console.log('[Melon Bulk] v2.4.0 ready.');
 })();
