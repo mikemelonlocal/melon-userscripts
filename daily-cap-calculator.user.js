@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Daily Cap Calculator - Melon Local (Enhanced)
 // @namespace    https://thepatch.melonlocal.com/
-// @version      3.7.0
+// @version      3.7.1
 // @description  Paces budgets evenly through end of month. Auto-fills from page data. Refresh + Freeze. Enhanced with auto-save, export/import, keyboard shortcuts, and improved UX.
 // @author       Melon Local
 // @match        https://thepatch.melonlocal.com/*
@@ -736,8 +736,6 @@
     /* ── Per-budget CPE override (shown when event cap toggle is on) ────── */
     .dcc-budget-cpe-wrap {
       display: none;
-      align-items: center;
-      gap: 3px;
       flex-shrink: 0;
     }
 
@@ -745,22 +743,22 @@
       display: inline-flex;
     }
 
-    .dcc-budget-cpe-label {
-      font-size: 10px;
-      font-weight: 700;
-      color: #b45309;
-      white-space: nowrap;
-    }
-
+    /* No visible label — placeholder text + amber border identify the field */
     .dcc-budget-cpe-wrap input {
-      width: 54px;
-      padding: 5px 6px;
+      width: 52px;
+      padding: 5px 5px;
       border: 1.5px solid #fcd34d;
       border-radius: 5px;
       font-size: 11px;
-      color: #222;
+      color: #92400e;
       background: #fffbeb;
+      text-align: center;
       transition: border-color 0.2s;
+    }
+
+    .dcc-budget-cpe-wrap input::placeholder {
+      color: #d97706;
+      font-weight: 700;
     }
 
     .dcc-budget-cpe-wrap input:focus {
@@ -1593,22 +1591,20 @@
         Storage.autoSave();
       });
 
-      // Per-budget CPE override — visible only when the product event toggle is on
+      // Per-budget CPE override — visible only when the product event toggle is on.
+      // No visible label: the amber border + "$/evt" placeholder identify it.
       const cpeWrap = document.createElement('div');
       cpeWrap.className = 'dcc-budget-cpe-wrap' + (showCpe ? ' visible' : '');
-      cpeWrap.title = 'Cost per event for this budget type (leave blank to use the product default)';
-      const cpeLabel = document.createElement('span');
-      cpeLabel.className = 'dcc-budget-cpe-label';
-      cpeLabel.textContent = '$/evt';
       const cpeInput = document.createElement('input');
       cpeInput.type = 'number';
-      cpeInput.placeholder = 'CPE';
+      cpeInput.placeholder = '$/evt';
+      cpeInput.title = 'Cost per event for this budget type — leave blank to use the product-level default';
       cpeInput.value = cpe || '';
       cpeInput.min = '0';
       cpeInput.step = '0.01';
       cpeInput.className = 'calc-budget-cpe';
       cpeInput.addEventListener('input', () => Storage.autoSave());
-      cpeWrap.append(cpeLabel, cpeInput);
+      cpeWrap.append(cpeInput);
 
       const removeBtn = document.createElement('button');
       removeBtn.className = 'dcc-remove-btn';
