@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Patch Note Formatter (Preserve Lists) + Full Term Normalizer + Preview Diff
 // @namespace    http://tampermonkey.net/
-// @version      1.8.0
-// @description  Formats Patch notes with bold headings and preserves numbered/bulleted lists. Normalizes alternative transcriptions to canonical terms. Adds a before/after preview diff with confirm/cancel and optional auto-save. Draggable UI + minimize. v1.8.0: extracted modal wiring helper, O(1) term lookup via Map, fixed nested-list bug, waitFor polling instead of fixed sleeps, user-editable term overrides in localStorage, focus trap in modal, injected stylesheet with CSS vars, history-patched route detection.
+// @version      1.9.0
+// @description  Formats Patch notes with bold headings and preserves lists. Normalizes alternative transcriptions to canonical terms. v1.9.0: Auditor view replaces line diff (changed words wrapped in <span data-prev=...> with CSS hover tooltip), Manage Terms gains a Simple-view table editor, SuggestionScanner runs in a Web Worker via inline Blob (no UI block on Levenshtein scans), Kendo Resilience: setEditorHtml fires change/input events to trigger CRM dirty-state for auto-save.
 // @match        https://thepatch.melonlocal.com/*
 // @run-at       document-end
 // @grant        none
@@ -30,6 +30,21 @@
     WAIT_POLL_MS: 60,
     EDITOR_SLEEP_MS: 250,
   };
+
+  // Private-Use-Area control chars used as sentinels around each
+  // normalization replacement. They survive HTML escaping (escapeHtml only
+  // touches &, <, >, ", '), trimming, and line-joining, so we can build the
+  // formatted HTML and then swap the sentinels for <span> wrappers in one pass.
+  const AUDIT = {
+    OPEN: "",
+    SEP: "",
+    CLOSE: "",
+  };
+  // /(original)(canonical)/g
+  const AUDIT_REGEX = new RegExp(
+    `${AUDIT.OPEN}([^${AUDIT.SEP}]*)${AUDIT.SEP}([^${AUDIT.CLOSE}]*)${AUDIT.CLOSE}`,
+    "g"
+  );
 
   // =============================
   // DEFAULT TERM NORMALIZATION (shipped defaults; user overrides merged in via TermStore)
@@ -506,6 +521,162 @@
           font-family: ui-monospace, Menlo, Monaco, Consolas, monospace;
           color: var(--pnf-pine);
         }
+        .pnf-after-editor mark.pnf-hl {
+          background: rgba(71,183,79,0.22);
+          color: inherit;
+          padding: 0 2px;
+          border-radius: 3px;
+          box-shadow: 0 0 0 1px rgba(71,183,79,0.4);
+        }
+
+        /* Auditor view — wraps every changed word with hover tooltip */
+        .pnf-audit-match {
+          position: relative;
+          background: rgba(71,183,79,0.18);
+          border-bottom: 2px dotted var(--pnf-clover);
+          padding: 0 1px;
+          border-radius: 2px;
+          cursor: help;
+        }
+        .pnf-audit-match:hover,
+        .pnf-audit-match:focus {
+          background: rgba(71,183,79,0.32);
+          outline: none;
+        }
+        .pnf-audit-match::after {
+          content: "Was: " attr(data-prev);
+          position: absolute;
+          bottom: calc(100% + 5px);
+          left: 50%;
+          transform: translateX(-50%);
+          background: var(--pnf-pine);
+          color: #fff;
+          padding: 5px 9px;
+          border-radius: 4px;
+          font-size: 11px;
+          font-family: sans-serif;
+          font-weight: 500;
+          white-space: nowrap;
+          pointer-events: none;
+          opacity: 0;
+          visibility: hidden;
+          transition: opacity 0.12s ease;
+          z-index: 100;
+          box-shadow: 0 2px 6px rgba(0,0,0,0.2);
+        }
+        .pnf-audit-match::before {
+          content: "";
+          position: absolute;
+          bottom: 100%;
+          left: 50%;
+          transform: translateX(-50%);
+          border: 5px solid transparent;
+          border-top-color: var(--pnf-pine);
+          pointer-events: none;
+          opacity: 0;
+          visibility: hidden;
+          transition: opacity 0.12s ease;
+          z-index: 100;
+        }
+        .pnf-audit-match:hover::after,
+        .pnf-audit-match:hover::before,
+        .pnf-audit-match:focus::after,
+        .pnf-audit-match:focus::before {
+          opacity: 1;
+          visibility: visible;
+        }
+
+        /* Manage Terms — Simple/JSON toggle and table editor */
+        .pnf-terms-toggle {
+          padding: 8px 14px;
+          background: var(--pnf-alpine);
+          border-bottom: 1px solid var(--pnf-mojave);
+          display: flex;
+          gap: 8px;
+        }
+        .pnf-terms-toggle button {
+          padding: 5px 12px;
+          border: 1px solid var(--pnf-mojave);
+          background: #fff;
+          color: var(--pnf-pine);
+          border-radius: 6px;
+          cursor: pointer;
+          font-size: 12px;
+          font-weight: 600;
+        }
+        .pnf-terms-toggle button.active {
+          background: var(--pnf-pine);
+          color: #fff;
+          border-color: var(--pnf-pine);
+        }
+        .pnf-terms-simple-wrap {
+          flex: 1;
+          display: flex;
+          flex-direction: column;
+          min-height: 0;
+          overflow: auto;
+          padding: 12px;
+          gap: 10px;
+        }
+        .pnf-terms-table {
+          width: 100%;
+          border-collapse: collapse;
+          font-size: 12px;
+        }
+        .pnf-terms-table thead th {
+          text-align: left;
+          padding: 6px 8px;
+          background: var(--pnf-alpine);
+          border-bottom: 1px solid var(--pnf-mojave);
+          font-weight: 700;
+          color: var(--pnf-pine);
+          position: sticky;
+          top: 0;
+        }
+        .pnf-terms-table thead th:last-child { width: 40px; }
+        .pnf-terms-table tbody tr {
+          border-bottom: 1px dashed rgba(207,186,151,0.4);
+        }
+        .pnf-terms-table tbody td { padding: 4px 6px; }
+        .pnf-terms-table input {
+          width: 100%;
+          padding: 6px 8px;
+          border: 1px solid var(--pnf-mojave);
+          border-radius: 4px;
+          font-size: 12px;
+          font-family: ui-monospace, Menlo, Monaco, Consolas, monospace;
+          color: var(--pnf-pine);
+          outline: none;
+          box-sizing: border-box;
+        }
+        .pnf-terms-table input:focus { border-color: var(--pnf-pine); }
+        .pnf-terms-row-remove {
+          width: 28px;
+          height: 28px;
+          border: none;
+          border-radius: 4px;
+          background: var(--pnf-mojave);
+          color: var(--pnf-coconut);
+          cursor: pointer;
+          font-size: 13px;
+          font-weight: 700;
+        }
+        .pnf-terms-row-remove:hover {
+          background: var(--pnf-cranberry);
+          color: #fff;
+        }
+        .pnf-terms-add-row {
+          align-self: flex-start;
+          padding: 8px 14px;
+          background: var(--pnf-clover);
+          color: #fff;
+          border: none;
+          border-radius: 6px;
+          cursor: pointer;
+          font-weight: 600;
+          font-size: 12px;
+        }
+        .pnf-terms-add-row:hover { background: var(--pnf-clover-hover); }
         .pnf-modal-footer {
           padding: 10px 14px;
           border-top: 1px solid var(--pnf-mojave);
@@ -604,6 +775,82 @@
           gap: 8px;
           margin-top: 4px;
         }
+
+        .pnf-suggestions-head {
+          padding: 8px 10px;
+          border-top: 1px solid var(--pnf-mojave);
+          border-bottom: 1px solid var(--pnf-mojave);
+          font-weight: 700;
+          background: var(--pnf-alpine);
+          color: var(--pnf-pine);
+          font-size: 12px;
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 8px;
+        }
+        .pnf-suggestions-count {
+          font-size: 11px;
+          padding: 1px 7px;
+          border-radius: 10px;
+          background: var(--pnf-pine);
+          color: #fff;
+          font-weight: 700;
+        }
+        .pnf-suggestions-body {
+          padding: 6px 10px;
+          font-size: 12px;
+          overflow: auto;
+          max-height: 220px;
+          min-height: 0;
+        }
+        .pnf-suggestion-row {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          gap: 8px;
+          padding: 3px 0;
+          border-bottom: 1px dashed rgba(207,186,151,0.4);
+        }
+        .pnf-suggestion-row:last-child { border-bottom: none; }
+        .pnf-suggestion-text {
+          flex: 1;
+          line-height: 1.4;
+          word-break: break-word;
+        }
+        .pnf-suggestion-alt {
+          font-family: ui-monospace, Menlo, Monaco, Consolas, monospace;
+          color: var(--pnf-cranberry);
+        }
+        .pnf-suggestion-canon {
+          color: var(--pnf-clover);
+          font-weight: 600;
+        }
+        .pnf-suggestion-count-x {
+          opacity: 0.55;
+          font-size: 11px;
+          margin-left: 4px;
+        }
+        .pnf-suggestion-btns { display: flex; gap: 4px; flex-shrink: 0; }
+        .pnf-suggestion-btn {
+          padding: 3px 9px;
+          border: none;
+          border-radius: 4px;
+          cursor: pointer;
+          font-size: 11px;
+          font-weight: 600;
+          color: #fff;
+        }
+        .pnf-suggestion-btn-add { background: var(--pnf-clover); }
+        .pnf-suggestion-btn-add:hover { background: var(--pnf-clover-hover); }
+        .pnf-suggestion-btn-dismiss {
+          background: var(--pnf-mojave);
+          color: var(--pnf-coconut);
+        }
+        .pnf-suggestion-btn-dismiss:hover {
+          background: var(--pnf-coconut);
+          color: #fff;
+        }
       `;
       document.head.appendChild(style);
       this.injected = true;
@@ -688,33 +935,325 @@
     return {
       rebuild,
 
+      // Returns:
+      //   text       — clean normalized output
+      //   auditText  — output with sentinels around each replacement so the
+      //                preview pipeline can wrap them in <span data-prev=...>
+      //   changeList — counted [{k: "match → canonical", v: n}]
       normalize(input) {
         if (!normalizationRegex || !input) {
-          return { text: input || "", changeList: [] };
+          return { text: input || "", auditText: input || "", changeList: [] };
         }
 
         const changesMap = new Map();
 
-        const output = input.replace(normalizationRegex, (match) => {
+        const auditText = input.replace(normalizationRegex, (match) => {
           const canonical = altIndex.get(match.toLowerCase());
           if (!canonical) return match;
 
           if (match !== canonical) {
             const key = `${match} → ${canonical}`;
             changesMap.set(key, (changesMap.get(key) || 0) + 1);
+            return `${AUDIT.OPEN}${match}${AUDIT.SEP}${canonical}${AUDIT.CLOSE}`;
           }
 
           return canonical;
         });
 
+        // Plain text is the audit text with sentinels stripped — keeps the
+        // canonical (capture group 2). Used for diff inputs and Apply/Copy.
+        const text = auditText.replace(AUDIT_REGEX, "$2");
+
         const changeList = Array.from(changesMap.entries())
           .map(([k, v]) => ({ k, v }))
           .sort((a, b) => b.v - a.v || a.k.localeCompare(b.k));
 
-        return { text: output, changeList };
+        return { text, auditText, changeList };
       },
     };
   })();
+
+  // =============================
+  // SUGGESTION SCANNER (Levenshtein-based near-match detector)
+  // Flags tokens in the note that look similar to a known canonical but aren't
+  // caught by the exact-match normalizer regex — likely a missing alt.
+  // =============================
+  // The core scan algorithm — a self-contained function with NO outer
+  // closures so it stringifies cleanly into a Web Worker. Helpers
+  // (levenshtein, tokenize, cleanEdges) are defined inside.
+  function pnfScanCore(beforeText, merged, dismissedList, opts) {
+    const DISTANCE_RATIO = opts.DISTANCE_RATIO;
+    const MIN_CANDIDATE_LEN = opts.MIN_CANDIDATE_LEN;
+    const MAX_CANONICAL_WORDS = opts.MAX_CANONICAL_WORDS;
+    const MAX_SUGGESTIONS = opts.MAX_SUGGESTIONS;
+
+    function levenshtein(a, b) {
+      if (a === b) return 0;
+      const m = a.length, n = b.length;
+      if (!m) return n;
+      if (!n) return m;
+      let prev = new Array(n + 1);
+      let cur = new Array(n + 1);
+      for (let j = 0; j <= n; j++) prev[j] = j;
+      for (let i = 1; i <= m; i++) {
+        cur[0] = i;
+        const ai = a[i - 1];
+        for (let j = 1; j <= n; j++) {
+          const cost = ai === b[j - 1] ? 0 : 1;
+          cur[j] = Math.min(cur[j - 1] + 1, prev[j] + 1, prev[j - 1] + cost);
+        }
+        const tmp = prev; prev = cur; cur = tmp;
+      }
+      return prev[n];
+    }
+
+    function tokenize(text) {
+      return (text || "").split(/(\s+)/).filter(function (s) {
+        return s && !/^\s+$/.test(s);
+      });
+    }
+
+    function cleanEdges(str) {
+      return str.replace(/^[.,;:!?'"()\[\]{}]+|[.,;:!?'"()\[\]{}]+$/g, "");
+    }
+
+    if (!beforeText || beforeText.length < MIN_CANDIDATE_LEN) return [];
+
+    const known = new Set();
+    for (const canon in merged) {
+      if (!Object.prototype.hasOwnProperty.call(merged, canon)) continue;
+      known.add(canon.toLowerCase());
+      const alts = merged[canon];
+      if (!Array.isArray(alts)) continue;
+      for (let i = 0; i < alts.length; i++) {
+        known.add((alts[i] || "").toLowerCase());
+      }
+    }
+
+    const dismissed = new Set(dismissedList || []);
+
+    const canonByWordCount = new Map();
+    for (const canon in merged) {
+      if (!Object.prototype.hasOwnProperty.call(merged, canon)) continue;
+      const wc = canon.trim().split(/\s+/).length;
+      if (wc > MAX_CANONICAL_WORDS) continue;
+      if (canon.length < MIN_CANDIDATE_LEN) continue;
+      if (!canonByWordCount.has(wc)) canonByWordCount.set(wc, []);
+      canonByWordCount.get(wc).push(canon);
+    }
+
+    const tokens = tokenize(beforeText);
+    const best = new Map();
+    const wcs = Array.from(canonByWordCount.keys());
+
+    for (let k = 0; k < wcs.length; k++) {
+      const wc = wcs[k];
+      const canons = canonByWordCount.get(wc);
+      for (let i = 0; i + wc <= tokens.length; i++) {
+        const raw = tokens.slice(i, i + wc).join(" ");
+        const candidate = cleanEdges(raw);
+        if (candidate.length < MIN_CANDIDATE_LEN) continue;
+        const candLower = candidate.toLowerCase();
+        if (known.has(candLower)) continue;
+
+        for (let c = 0; c < canons.length; c++) {
+          const canon = canons[c];
+          const lenDiff = Math.abs(canon.length - candidate.length);
+          const maxLen = Math.max(canon.length, candidate.length);
+          if (lenDiff / maxLen > DISTANCE_RATIO + 0.05) continue;
+
+          const dist = levenshtein(candLower, canon.toLowerCase());
+          if (dist === 0) continue;
+          const ratio = dist / maxLen;
+          if (ratio > DISTANCE_RATIO) continue;
+
+          const key = candidate + "→" + canon;
+          if (dismissed.has(key)) continue;
+
+          const existing = best.get(candidate);
+          if (!existing || dist < existing.dist) {
+            best.set(candidate, {
+              candidate: candidate,
+              canonical: canon,
+              dist: dist,
+              ratio: ratio,
+              count: 1,
+              key: key,
+            });
+          }
+        }
+      }
+    }
+
+    const results = Array.from(best.values());
+    results.sort(function (a, b) {
+      return a.ratio - b.ratio || b.count - a.count;
+    });
+    return results.slice(0, MAX_SUGGESTIONS);
+  }
+
+  const SuggestionScanner = {
+    DISMISSED_KEY: "patchNoteFormatter_dismissed_v1",
+    MAX_SUGGESTIONS: 40,
+    DISTANCE_RATIO: 0.3,
+    MIN_CANDIDATE_LEN: 4,
+    MAX_CANONICAL_WORDS: 3,
+
+    _worker: null,
+    _workerUrl: null,
+    _pending: new Map(),
+
+    getDismissed() {
+      return Storage.get(this.DISMISSED_KEY, []) || [];
+    },
+
+    addDismissed(key) {
+      const d = this.getDismissed();
+      if (!d.includes(key)) {
+        d.push(key);
+        Storage.set(this.DISMISSED_KEY, d);
+      }
+    },
+
+    clearDismissed() {
+      Storage.set(this.DISMISSED_KEY, []);
+    },
+
+    _getOpts() {
+      return {
+        DISTANCE_RATIO: this.DISTANCE_RATIO,
+        MIN_CANDIDATE_LEN: this.MIN_CANDIDATE_LEN,
+        MAX_CANONICAL_WORDS: this.MAX_CANONICAL_WORDS,
+        MAX_SUGGESTIONS: this.MAX_SUGGESTIONS,
+      };
+    },
+
+    // Lazily build a single shared Worker from an inline Blob URL.
+    _initWorker() {
+      if (this._worker) return this._worker;
+      if (typeof Worker === "undefined" || typeof Blob === "undefined") return null;
+      try {
+        const src =
+          "var pnfScanCore = " + pnfScanCore.toString() + ";\n" +
+          "self.onmessage = function(e) {\n" +
+          "  var d = e.data || {};\n" +
+          "  try {\n" +
+          "    var result = pnfScanCore(d.beforeText, d.merged, d.dismissed, d.opts);\n" +
+          "    self.postMessage({ ok: true, result: result, requestId: d.requestId });\n" +
+          "  } catch (err) {\n" +
+          "    self.postMessage({ ok: false, error: (err && err.message) || 'Worker error', requestId: d.requestId });\n" +
+          "  }\n" +
+          "};";
+        const blob = new Blob([src], { type: "application/javascript" });
+        this._workerUrl = URL.createObjectURL(blob);
+        this._worker = new Worker(this._workerUrl);
+
+        this._worker.addEventListener("message", (e) => {
+          const data = e.data || {};
+          const handlers = this._pending.get(data.requestId);
+          if (!handlers) return;
+          this._pending.delete(data.requestId);
+          if (data.ok) handlers.resolve(data.result);
+          else handlers.reject(new Error(data.error || "Worker error"));
+        });
+
+        this._worker.addEventListener("error", (err) => {
+          console.warn("[PatchNoteFormatter] Worker error; resetting:", err);
+          for (const [, h] of this._pending) h.reject(err);
+          this._pending.clear();
+          try { this._worker.terminate(); } catch (_) {}
+          this._worker = null;
+        });
+
+        return this._worker;
+      } catch (e) {
+        console.warn("[PatchNoteFormatter] Worker init failed; falling back to main thread:", e);
+        return null;
+      }
+    },
+
+    _escapeRegExp(s) {
+      return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    },
+
+    // Tally raw-text occurrences for each candidate. Cheap and main-thread.
+    _withCounts(beforeText, suggestions) {
+      return suggestions.map((s) => {
+        try {
+          const re = new RegExp(`\\b${this._escapeRegExp(s.candidate)}\\b`, "gi");
+          const matches = beforeText.match(re);
+          return Object.assign({}, s, { count: matches ? matches.length : s.count });
+        } catch (_) {
+          return s;
+        }
+      });
+    },
+
+    // Returns Promise<suggestions[]>. Worker-first with main-thread fallback.
+    scan(beforeText) {
+      const merged = TermStore.getMerged();
+      const dismissed = this.getDismissed();
+      const opts = this._getOpts();
+      const worker = this._initWorker();
+
+      if (!worker) {
+        try {
+          const result = pnfScanCore(beforeText, merged, dismissed, opts);
+          return Promise.resolve(this._withCounts(beforeText, result));
+        } catch (e) {
+          return Promise.reject(e);
+        }
+      }
+
+      return new Promise((resolve, reject) => {
+        const requestId = "req_" + Date.now() + "_" + Math.random().toString(36).slice(2);
+        this._pending.set(requestId, {
+          resolve: (r) => resolve(this._withCounts(beforeText, r)),
+          reject,
+        });
+        worker.postMessage({ beforeText, merged, dismissed, opts, requestId });
+      });
+    },
+
+    // Legacy synchronous helper (deprecated; kept for any external caller).
+    levenshtein(a, b) {
+      if (a === b) return 0;
+      const m = a.length;
+      const n = b.length;
+      if (!m) return n;
+      if (!n) return m;
+
+      let prev = new Array(n + 1);
+      let cur = new Array(n + 1);
+      for (let j = 0; j <= n; j++) prev[j] = j;
+
+      for (let i = 1; i <= m; i++) {
+        cur[0] = i;
+        for (let j = 1; j <= n; j++) {
+          const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+          cur[j] = Math.min(
+            cur[j - 1] + 1,
+            prev[j] + 1,
+            prev[j - 1] + cost
+          );
+        }
+        [prev, cur] = [cur, prev];
+      }
+      return prev[n];
+    },
+
+    // Split into words while keeping them addressable for windowing.
+    tokenize(text) {
+      return (text || "")
+        .split(/(\s+)/)
+        .filter((s) => s && !/^\s+$/.test(s));
+    },
+
+    // Strip leading/trailing punctuation from a window.
+    cleanEdges(str) {
+      return str.replace(/^[.,;:!?'"()\[\]{}]+|[.,;:!?'"()\[\]{}]+$/g, "");
+    },
+  };
 
   // =============================
   // HTML PROCESSING
@@ -857,27 +1396,62 @@
     async setEditorHtml(html) {
       try {
         const editor = this.getKendoEditor();
+        const ta = this.findKendoEditorTextarea();
+
         if (editor) {
           editor.value(html);
-          return { ok: true };
-        }
-
-        const ta = this.findKendoEditorTextarea();
-        if (ta) {
+        } else if (ta) {
           const existing = ta.value || "";
           if (Utils.looksLikeEscapedHtml(existing)) {
             ta.value = Utils.encodeHtmlEntities(html);
           } else {
             ta.value = html;
           }
-          return { ok: true };
+        } else {
+          return { ok: false, error: "Editor not found." };
         }
 
-        return { ok: false, error: "Editor not found." };
+        // Kendo Resilience: force the underlying textarea's change/input
+        // pipeline so the CRM's auto-save dirty-state listener fires.
+        // editor.value(html) updates the DOM but doesn't always synthesize
+        // the textarea events Kendo wires into ng/angular dirty tracking.
+        if (ta) {
+          this._fireDirtyEvents(ta);
+        }
+
+        return { ok: true };
       } catch (e) {
         console.error("[PatchNoteFormatter] Error setting editor:", e);
         return { ok: false, error: e.message || "Unknown error" };
       }
+    },
+
+    _fireDirtyEvents(ta) {
+      const $ = window.jQuery || window.$;
+
+      // jQuery path covers Kendo's event bus and most CRM listeners.
+      if ($) {
+        try {
+          $(ta).trigger("change").trigger("input").trigger("blur");
+        } catch (_) { /* fall through to native */ }
+      }
+
+      // Native fallback / supplement — covers listeners attached via
+      // addEventListener that don't see jQuery synthetic events.
+      const fire = (name) => {
+        try {
+          ta.dispatchEvent(new Event(name, { bubbles: true, cancelable: false }));
+        } catch (_) {
+          // Older IE-style fallback (unlikely on this CRM but cheap).
+          try {
+            const ev = document.createEvent("Event");
+            ev.initEvent(name, true, false);
+            ta.dispatchEvent(ev);
+          } catch (_) { /* nothing to do */ }
+        }
+      };
+      fire("input");
+      fire("change");
     },
   };
 
@@ -982,6 +1556,108 @@
       const lines = text.replace(/\r\n/g, "\n").split("\n");
       const blocks = this.parseBlocksPreserveLists(lines);
       return this.blocksToHtml(blocks);
+    },
+
+    // Build the formatted HTML from sentinel-marked auditText.
+    // Each "ORIGINALSEPCANONICAL" sentinel survives line splitting,
+    // trimming, joining and escapeHtml — we then swap them for
+    // <span class="pnf-audit-match" data-prev="ORIGINAL">CANONICAL</span> in
+    // a single regex pass. The captured original is already HTML-attribute
+    // safe (escapeHtml has run on the whole text node).
+    buildAuditHtmlFromText(auditText) {
+      const html = this.buildFormattedHtmlFromText(auditText || "");
+      return html.replace(AUDIT_REGEX, (_, original, canonical) =>
+        `<span class="pnf-audit-match" data-prev="${original}" tabindex="0">${canonical}</span>`
+      );
+    },
+
+    // Remove audit-span wrappers, preserving inner text. Use before pushing
+    // HTML into the Kendo editor or copying to clipboard.
+    stripAuditMarks(html) {
+      if (!html) return html;
+      const container = document.createElement("div");
+      container.innerHTML = html;
+      const marks = container.querySelectorAll("span.pnf-audit-match");
+      marks.forEach((m) => {
+        const parent = m.parentNode;
+        while (m.firstChild) parent.insertBefore(m.firstChild, m);
+        parent.removeChild(m);
+      });
+      return container.innerHTML;
+    },
+
+    // Legacy v1.8 highlight helper — retained for back-compat with any
+    // external caller; new code should use buildAuditHtmlFromText.
+    highlightChangedInHtml(html, changedCanonicals) {
+      if (!html || !changedCanonicals || !changedCanonicals.length) return html;
+
+      const uniq = Array.from(new Set(changedCanonicals.filter(Boolean)));
+      if (!uniq.length) return html;
+
+      const parts = uniq
+        .slice()
+        .sort((a, b) => b.length - a.length)
+        .map((c) => Utils.escapeRegExp(c));
+      const regex = new RegExp(`\\b(?:${parts.join("|")})\\b`, "g");
+
+      const container = document.createElement("div");
+      container.innerHTML = html;
+
+      const walk = (node) => {
+        if (node.nodeType === Node.TEXT_NODE) {
+          const text = node.nodeValue;
+          if (!text) return;
+
+          regex.lastIndex = 0;
+          const matches = [];
+          let m;
+          while ((m = regex.exec(text)) !== null) {
+            matches.push({ start: m.index, end: m.index + m[0].length, text: m[0] });
+            if (m.index === regex.lastIndex) regex.lastIndex++;
+          }
+          if (!matches.length) return;
+
+          const frag = document.createDocumentFragment();
+          let cursor = 0;
+          for (const match of matches) {
+            if (match.start > cursor) {
+              frag.appendChild(document.createTextNode(text.slice(cursor, match.start)));
+            }
+            const mark = document.createElement("mark");
+            mark.className = "pnf-hl";
+            mark.textContent = match.text;
+            frag.appendChild(mark);
+            cursor = match.end;
+          }
+          if (cursor < text.length) {
+            frag.appendChild(document.createTextNode(text.slice(cursor)));
+          }
+          node.parentNode.replaceChild(frag, node);
+          return;
+        }
+        if (node.nodeType !== Node.ELEMENT_NODE) return;
+        if (node.tagName === "MARK") return; // don't re-wrap
+        // Snapshot children because we're mutating.
+        Array.from(node.childNodes).forEach(walk);
+      };
+
+      walk(container);
+      return container.innerHTML;
+    },
+
+    // Remove highlight <mark> wrappers, preserving their inner content.
+    // Call before pushing HTML back into the Kendo editor or copying to clipboard.
+    stripHighlightMarks(html) {
+      if (!html) return html;
+      const container = document.createElement("div");
+      container.innerHTML = html;
+      const marks = container.querySelectorAll("mark.pnf-hl");
+      marks.forEach((m) => {
+        const parent = m.parentNode;
+        while (m.firstChild) parent.insertBefore(m.firstChild, m);
+        parent.removeChild(m);
+      });
+      return container.innerHTML;
     },
   };
 
@@ -1171,7 +1847,7 @@
       const title = document.createElement("div");
       title.id = "previewModalTitle";
       title.className = "pnf-modal-header-title";
-      title.textContent = "Preview: Normalize terms + Format note";
+      title.textContent = "Preview: Normalize + Format (Auditor view — hover changed words)";
       header.appendChild(title);
 
       return header;
@@ -1247,13 +1923,78 @@
 
       this._renderChanges(leftBody, changes);
 
-      const diffWrap = this._buildDiffSection({ limitedBefore, limitedAfter });
+      // Suggestions section — populated asynchronously by _showPreviewAndApply
+      // so the modal can appear without waiting on the Levenshtein scan.
+      const suggestionsHead = document.createElement("div");
+      suggestionsHead.className = "pnf-suggestions-head";
+      const sugTitle = document.createElement("span");
+      sugTitle.textContent = "Suggestions (near-matches)";
+      const sugCount = document.createElement("span");
+      sugCount.className = "pnf-suggestions-count";
+      sugCount.id = "patchSuggestionsCount";
+      sugCount.textContent = "…";
+      suggestionsHead.appendChild(sugTitle);
+      suggestionsHead.appendChild(sugCount);
 
+      const suggestionsBody = document.createElement("div");
+      suggestionsBody.id = "patchSuggestionsList";
+      suggestionsBody.className = "pnf-suggestions-body";
+      suggestionsBody.innerHTML = '<div class="pnf-no-changes">Scanning…</div>';
+
+      // v1.9: line diff replaced by the Auditor view (hover tooltips on
+      // each changed word in the right pane).
       left.appendChild(leftHead);
       left.appendChild(leftBody);
-      left.appendChild(diffWrap);
+      left.appendChild(suggestionsHead);
+      left.appendChild(suggestionsBody);
 
       return left;
+    },
+
+    renderSuggestionsInto(container, suggestions, { onAdd, onDismiss }) {
+      const countEl = document.getElementById("patchSuggestionsCount");
+      if (countEl) countEl.textContent = String(suggestions.length);
+
+      if (!suggestions.length) {
+        container.innerHTML =
+          '<div class="pnf-no-changes">No near-matches found. Use "+ Add term" to add a rule manually.</div>';
+        return;
+      }
+      container.innerHTML = "";
+      for (const s of suggestions) {
+        const row = document.createElement("div");
+        row.className = "pnf-suggestion-row";
+
+        const text = document.createElement("div");
+        text.className = "pnf-suggestion-text";
+        const altSpan = `<span class="pnf-suggestion-alt">${Utils.escapeHtml(s.candidate)}</span>`;
+        const canonSpan = `<span class="pnf-suggestion-canon">${Utils.escapeHtml(s.canonical)}</span>`;
+        const countSpan = s.count > 1
+          ? `<span class="pnf-suggestion-count-x">${s.count}×</span>`
+          : "";
+        text.innerHTML = `${altSpan} → ${canonSpan}${countSpan}`;
+
+        const btns = document.createElement("div");
+        btns.className = "pnf-suggestion-btns";
+
+        const btnAdd = document.createElement("button");
+        btnAdd.className = "pnf-suggestion-btn pnf-suggestion-btn-add";
+        btnAdd.textContent = "Add";
+        btnAdd.title = `Add "${s.candidate}" as an alternate for "${s.canonical}"`;
+        btnAdd.onclick = () => onAdd(s);
+
+        const btnDismiss = document.createElement("button");
+        btnDismiss.className = "pnf-suggestion-btn pnf-suggestion-btn-dismiss";
+        btnDismiss.textContent = "✕";
+        btnDismiss.title = "Dismiss this suggestion";
+        btnDismiss.onclick = () => onDismiss(s);
+
+        btns.appendChild(btnAdd);
+        btns.appendChild(btnDismiss);
+        row.appendChild(text);
+        row.appendChild(btns);
+        container.appendChild(row);
+      }
     },
 
     _renderChanges(leftBody, changes) {
@@ -1397,8 +2138,42 @@
       if (el) el.remove();
     },
 
+    // Convert {canonical: [alts]} → flat row list [{alt, canon}, ...]
+    _toRows(overrides) {
+      const rows = [];
+      for (const [canon, alts] of Object.entries(overrides || {})) {
+        if (!Array.isArray(alts)) continue;
+        for (const alt of alts) rows.push({ alt: String(alt || ""), canon });
+      }
+      return rows;
+    },
+
+    // Convert flat row list → {canonical: [alts]} (drops empties, dedups).
+    _fromRows(rows) {
+      const out = {};
+      for (const r of rows) {
+        const alt = (r.alt || "").trim();
+        const canon = (r.canon || "").trim();
+        if (!alt || !canon) continue;
+        if (!out[canon]) out[canon] = [];
+        if (!out[canon].includes(alt)) out[canon].push(alt);
+      }
+      return out;
+    },
+
     open() {
       this.remove();
+
+      // Single source of truth for both views. Each toggle re-derives the
+      // "other side" from this state so an unsaved edit in one view is
+      // reflected when switching.
+      const state = {
+        mode: "simple", // "simple" | "json"
+        overrides: TermStore.getUserOverrides(),
+        rows: [],
+      };
+      state.rows = this._toRows(state.overrides);
+      if (!state.rows.length) state.rows.push({ alt: "", canon: "" });
 
       const overlay = document.createElement("div");
       overlay.id = "patchTermsModal";
@@ -1410,7 +2185,7 @@
       modal.setAttribute("aria-labelledby", "termsModalTitle");
       modal.tabIndex = -1;
 
-      // Header
+      // ----- Header -----
       const header = document.createElement("div");
       header.className = "pnf-modal-header";
 
@@ -1444,32 +2219,182 @@
       headerBtns.appendChild(btnSave);
       header.appendChild(headerBtns);
 
-      // Help
+      // ----- View toggle -----
+      const toggle = document.createElement("div");
+      toggle.className = "pnf-terms-toggle";
+
+      const btnSimple = document.createElement("button");
+      btnSimple.type = "button";
+      btnSimple.textContent = "Simple view";
+      btnSimple.setAttribute("aria-label", "Switch to table editor");
+
+      const btnJson = document.createElement("button");
+      btnJson.type = "button";
+      btnJson.textContent = "JSON view";
+      btnJson.setAttribute("aria-label", "Switch to JSON editor");
+
+      toggle.appendChild(btnSimple);
+      toggle.appendChild(btnJson);
+
+      // ----- Help banner (mode-aware) -----
       const help = document.createElement("div");
       help.className = "pnf-terms-help";
-      help.innerHTML =
-        'Paste a JSON object of <strong>canonical → array of alternates</strong>. Entries here are <em>added to</em> the shipped defaults (duplicates are harmless). Example: <code>{ "Scorecard": ["scoreboard", "score-cards"] }</code>';
 
-      // Body
+      // ----- Body container (rebuilt on toggle) -----
       const body = document.createElement("div");
       body.className = "pnf-terms-body";
-
-      const textarea = document.createElement("textarea");
-      textarea.className = "pnf-terms-textarea";
-      textarea.spellcheck = false;
-      textarea.value = JSON.stringify(TermStore.getUserOverrides(), null, 2);
 
       const status = document.createElement("div");
       status.className = "pnf-terms-status";
 
-      body.appendChild(textarea);
-      body.appendChild(status);
+      // ----- Renderers -----
+      const renderSimple = () => {
+        body.innerHTML = "";
+        help.innerHTML =
+          'Edit one alternate-per-row. <strong>Original</strong> is the variant to normalize; <strong>Canonical</strong> is what it becomes. Empty rows are ignored on save.';
 
-      modal.appendChild(header);
-      modal.appendChild(help);
-      modal.appendChild(body);
-      overlay.appendChild(modal);
+        const wrap = document.createElement("div");
+        wrap.className = "pnf-terms-simple-wrap";
 
+        const table = document.createElement("table");
+        table.className = "pnf-terms-table";
+
+        const thead = document.createElement("thead");
+        const headRow = document.createElement("tr");
+        ["Original (alternate)", "Canonical (replacement)", ""].forEach((label) => {
+          const th = document.createElement("th");
+          th.textContent = label;
+          headRow.appendChild(th);
+        });
+        thead.appendChild(headRow);
+        table.appendChild(thead);
+
+        const tbody = document.createElement("tbody");
+
+        const renderRows = () => {
+          tbody.innerHTML = "";
+          state.rows.forEach((row, idx) => {
+            const tr = document.createElement("tr");
+
+            const tdAlt = document.createElement("td");
+            const inpAlt = document.createElement("input");
+            inpAlt.type = "text";
+            inpAlt.value = row.alt;
+            inpAlt.placeholder = "e.g. mellon";
+            inpAlt.spellcheck = false;
+            inpAlt.oninput = (e) => { row.alt = e.target.value; };
+            tdAlt.appendChild(inpAlt);
+            tr.appendChild(tdAlt);
+
+            const tdCanon = document.createElement("td");
+            const inpCanon = document.createElement("input");
+            inpCanon.type = "text";
+            inpCanon.value = row.canon;
+            inpCanon.placeholder = "e.g. Melon";
+            inpCanon.spellcheck = false;
+            inpCanon.oninput = (e) => { row.canon = e.target.value; };
+            tdCanon.appendChild(inpCanon);
+            tr.appendChild(tdCanon);
+
+            const tdRm = document.createElement("td");
+            const btnRm = document.createElement("button");
+            btnRm.type = "button";
+            btnRm.className = "pnf-terms-row-remove";
+            btnRm.textContent = "✕";
+            btnRm.title = "Remove row";
+            btnRm.setAttribute("aria-label", "Remove row");
+            btnRm.onclick = () => {
+              state.rows.splice(idx, 1);
+              if (!state.rows.length) state.rows.push({ alt: "", canon: "" });
+              renderRows();
+            };
+            tdRm.appendChild(btnRm);
+            tr.appendChild(tdRm);
+
+            tbody.appendChild(tr);
+          });
+        };
+
+        renderRows();
+        table.appendChild(tbody);
+
+        const addBtn = document.createElement("button");
+        addBtn.type = "button";
+        addBtn.className = "pnf-terms-add-row";
+        addBtn.textContent = "+ Add row";
+        addBtn.onclick = () => {
+          state.rows.push({ alt: "", canon: "" });
+          renderRows();
+          // Focus the new alt input
+          const inputs = tbody.querySelectorAll("tr:last-child input");
+          if (inputs.length) inputs[0].focus();
+        };
+
+        wrap.appendChild(table);
+        wrap.appendChild(addBtn);
+        body.appendChild(wrap);
+      };
+
+      const renderJson = () => {
+        body.innerHTML = "";
+        help.innerHTML =
+          'JSON object of <strong>canonical → array of alternates</strong>. Useful for bulk paste / export. Example: <code>{ "Scorecard": ["scoreboard", "score-cards"] }</code>';
+
+        const ta = document.createElement("textarea");
+        ta.className = "pnf-terms-textarea";
+        ta.spellcheck = false;
+        ta.value = JSON.stringify(state.overrides || {}, null, 2);
+        ta.id = "pnfTermsJsonTextarea";
+
+        // Keep state.overrides in sync so a switch-to-Simple picks up edits.
+        ta.oninput = () => {
+          try {
+            const parsed = JSON.parse(ta.value || "{}");
+            if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+              state.overrides = parsed;
+            }
+          } catch (_) { /* invalid mid-typing; ignore until save/toggle */ }
+        };
+
+        body.appendChild(ta);
+      };
+
+      const setMode = (mode) => {
+        // Sync state out of the OLD view before swapping.
+        if (state.mode === "simple" && mode !== "simple") {
+          state.overrides = this._fromRows(state.rows);
+        } else if (state.mode === "json" && mode !== "json") {
+          // Try to take whatever the textarea has; if invalid, keep current state.overrides.
+          const ta = document.getElementById("pnfTermsJsonTextarea");
+          if (ta) {
+            try {
+              const parsed = JSON.parse(ta.value || "{}");
+              if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+                state.overrides = parsed;
+              }
+            } catch (e) {
+              status.textContent = `JSON view had a parse error (${e.message}). Discarded; switched to Simple view.`;
+              status.className = "pnf-terms-status error";
+            }
+          }
+          state.rows = this._toRows(state.overrides);
+          if (!state.rows.length) state.rows.push({ alt: "", canon: "" });
+        }
+
+        state.mode = mode;
+        btnSimple.classList.toggle("active", mode === "simple");
+        btnJson.classList.toggle("active", mode === "json");
+        if (mode === "simple") renderSimple();
+        else renderJson();
+      };
+
+      btnSimple.onclick = () => setMode("simple");
+      btnJson.onclick = () => setMode("json");
+
+      // Default to Simple view (safer for non-JSON-fluent users).
+      setMode("simple");
+
+      // ----- Wire actions -----
       const cleanup = () => this.remove();
 
       btnCancel.onclick = cleanup;
@@ -1489,31 +2414,51 @@
         if (!confirm("Clear all user overrides? Shipped defaults will remain.")) return;
         TermStore.setUserOverrides({});
         TermNormalizer.rebuild();
-        textarea.value = "{}";
+        state.overrides = {};
+        state.rows = [{ alt: "", canon: "" }];
+        if (state.mode === "simple") renderSimple();
+        else renderJson();
         status.textContent = "User overrides cleared.";
         status.className = "pnf-terms-status ok";
       };
 
       btnSave.onclick = () => {
-        let parsed;
-        try {
-          parsed = JSON.parse(textarea.value || "{}");
-        } catch (e) {
-          status.textContent = `Invalid JSON: ${e.message}`;
-          status.className = "pnf-terms-status error";
-          return;
+        let overrides;
+        if (state.mode === "simple") {
+          overrides = this._fromRows(state.rows);
+        } else {
+          const ta = document.getElementById("pnfTermsJsonTextarea");
+          try {
+            overrides = JSON.parse((ta && ta.value) || "{}");
+          } catch (e) {
+            status.textContent = `Invalid JSON: ${e.message}`;
+            status.className = "pnf-terms-status error";
+            return;
+          }
         }
-        const err = TermStore.validateOverrides(parsed);
+        const err = TermStore.validateOverrides(overrides);
         if (err) {
           status.textContent = err;
           status.className = "pnf-terms-status error";
           return;
         }
-        TermStore.setUserOverrides(parsed);
+        TermStore.setUserOverrides(overrides);
         TermNormalizer.rebuild();
+        // Refresh state so subsequent toggles reflect what was saved.
+        state.overrides = overrides;
+        state.rows = this._toRows(overrides);
+        if (!state.rows.length) state.rows.push({ alt: "", canon: "" });
         status.textContent = "Saved. Normalizer reloaded.";
         status.className = "pnf-terms-status ok";
       };
+
+      // ----- Assemble -----
+      modal.appendChild(header);
+      modal.appendChild(toggle);
+      modal.appendChild(help);
+      modal.appendChild(body);
+      modal.appendChild(status);
+      overlay.appendChild(modal);
 
       // Focus trap
       modal.addEventListener("keydown", (e) => {
@@ -1534,7 +2479,10 @@
       });
 
       document.body.appendChild(overlay);
-      setTimeout(() => textarea.focus(), 0);
+      setTimeout(() => {
+        const firstInput = body.querySelector("input, textarea");
+        if (firstInput) firstInput.focus();
+      }, 0);
     },
   };
 
@@ -1720,11 +2668,17 @@
 
     // Build the modal, wire all buttons, and resolve when the user
     // applies/cancels/closes. Used by both the editor-preview and clipboard-preview flows.
-    async _showPreviewAndApply({ beforeText, normalizedText, formattedHtml, changeList }) {
+    async _showPreviewAndApply({ beforeText, normalizedText, auditText, formattedHtml, changeList }) {
+      // Build the Auditor HTML directly from the sentinel-marked auditText.
+      // Each changed word becomes <span class="pnf-audit-match" data-prev=...>.
+      const auditHtml = auditText
+        ? TextFormatter.buildAuditHtmlFromText(auditText)
+        : formattedHtml;
+
       const [overlay, btnCancel, btnRenormalize, btnApply, afterEditor] = PreviewModal.build({
         beforeText,
         normalizedText,
-        formattedHtml,
+        formattedHtml: auditHtml,
         changes: changeList,
       });
 
@@ -1732,10 +2686,16 @@
 
       btnRenormalize.onclick = () => {
         try {
+          // htmlToStructuredText walks <span> transparently (no special-case),
+          // so existing audit wrappers don't pollute the re-normalize input —
+          // we just get the canonical text content.
           const currentHtml = afterEditor.innerHTML || "";
           const currentText = HtmlProcessor.htmlToStructuredText(currentHtml);
-          const { text: renormalizedText, changeList: newChanges } = TermNormalizer.normalize(currentText);
-          afterEditor.innerHTML = TextFormatter.buildFormattedHtmlFromText(renormalizedText);
+          const {
+            auditText: newAudit,
+            changeList: newChanges,
+          } = TermNormalizer.normalize(currentText);
+          afterEditor.innerHTML = TextFormatter.buildAuditHtmlFromText(newAudit);
 
           const leftBody = document.getElementById("patchChangesList");
           if (leftBody) PreviewModal.renderChangesInto(leftBody, newChanges);
@@ -1753,7 +2713,8 @@
       if (btnCopy) {
         btnCopy.onclick = async () => {
           try {
-            const structuredText = HtmlProcessor.htmlToStructuredText(afterEditor.innerHTML);
+            const cleanHtml = TextFormatter.stripAuditMarks(afterEditor.innerHTML);
+            const structuredText = HtmlProcessor.htmlToStructuredText(cleanHtml);
             await navigator.clipboard.writeText(structuredText);
             btnCopy.textContent = "Copied!";
             setTimeout(() => (btnCopy.textContent = "Copy"), 1500);
@@ -1767,15 +2728,63 @@
       const btnAddTerm = overlay.querySelector(
         'button[aria-label="Add term normalization from selection"]'
       );
+
+      // Shared helper: (re-)run the Levenshtein scan and render into the list.
+      // Deferred via setTimeout so the modal paints before the scan runs.
+      // Track the active scan request so a stale Worker reply can't overwrite
+      // the list when the user has already issued a newer rescan.
+      let scanGen = 0;
+
+      const runSuggestionScan = () => {
+        const listEl = document.getElementById("patchSuggestionsList");
+        if (!listEl) return;
+        listEl.innerHTML = '<div class="pnf-no-changes">Scanning…</div>';
+        const countEl = document.getElementById("patchSuggestionsCount");
+        if (countEl) countEl.textContent = "…";
+
+        const myGen = ++scanGen;
+
+        SuggestionScanner.scan(beforeText)
+          .then((suggestions) => {
+            if (myGen !== scanGen) return; // a newer scan superseded this one
+            const listNow = document.getElementById("patchSuggestionsList");
+            if (!listNow) return; // modal closed mid-scan
+            PreviewModal.renderSuggestionsInto(listNow, suggestions, {
+              onAdd: (s) => {
+                const overrides = TermStore.getUserOverrides();
+                const existing = Array.isArray(overrides[s.canonical]) ? overrides[s.canonical] : [];
+                if (!existing.includes(s.candidate)) {
+                  overrides[s.canonical] = [...existing, s.candidate];
+                  TermStore.setUserOverrides(overrides);
+                }
+                TermNormalizer.rebuild();
+                btnRenormalize.click();
+                runSuggestionScan();
+              },
+              onDismiss: (s) => {
+                SuggestionScanner.addDismissed(s.key);
+                runSuggestionScan();
+              },
+            });
+          })
+          .catch((e) => {
+            if (myGen !== scanGen) return;
+            console.error("[PatchNoteFormatter] Suggestion scan failed:", e);
+            const listNow = document.getElementById("patchSuggestionsList");
+            if (listNow) {
+              listNow.innerHTML =
+                '<div class="pnf-no-changes">Suggestion scan failed (see console).</div>';
+            }
+          });
+      };
+
       if (btnAddTerm) {
         btnAddTerm.onclick = () => {
-          // Pull selection from the preview contenteditable if present.
           let selectedText = "";
           const sel = window.getSelection();
           if (sel && sel.toString) {
             selectedText = sel.toString().trim();
           }
-          // Only prefill if the selection actually lives inside our modal.
           if (selectedText && sel.rangeCount) {
             const range = sel.getRangeAt(0);
             if (!overlay.contains(range.commonAncestorContainer)) {
@@ -1786,8 +2795,8 @@
           AddTermDialog.open({
             prefillAlt: selectedText,
             onSave: ({ alt, canon }) => {
-              // Trigger a re-normalize so the new rule takes effect on the live preview.
               btnRenormalize.click();
+              runSuggestionScan();
               const orig = btnAddTerm.textContent;
               btnAddTerm.textContent = `Added "${alt}" → "${canon}"`;
               setTimeout(() => (btnAddTerm.textContent = orig), 1800);
@@ -1795,6 +2804,9 @@
           });
         };
       }
+
+      // Kick off the initial scan after the modal is attached to the DOM.
+      runSuggestionScan();
 
       return new Promise((resolve) => {
         const cleanup = () => PreviewModal.remove();
@@ -1806,7 +2818,8 @@
 
         btnApply.onclick = async () => {
           try {
-            const res = await this.applyHtmlToEditorAndMaybeSave(afterEditor.innerHTML);
+            const cleanHtml = TextFormatter.stripAuditMarks(afterEditor.innerHTML);
+            const res = await this.applyHtmlToEditorAndMaybeSave(cleanHtml);
             cleanup();
             resolve({ ok: res.ok, info: res.info });
           } catch (e) {
@@ -1834,10 +2847,16 @@
         }
 
         const beforeText = EditorInterface.getEditorRawText();
-        const { text: normalizedText, changeList } = TermNormalizer.normalize(beforeText);
-        const formattedHtml = TextFormatter.buildFormattedHtmlFromText(normalizedText);
+        const { text: normalizedText, auditText, changeList } = TermNormalizer.normalize(beforeText);
+        const formattedHtml = TextFormatter.buildAuditHtmlFromText(auditText);
 
-        return await this._showPreviewAndApply({ beforeText, normalizedText, formattedHtml, changeList });
+        return await this._showPreviewAndApply({
+          beforeText,
+          normalizedText,
+          auditText,
+          formattedHtml,
+          changeList,
+        });
       } catch (e) {
         console.error("[PatchNoteFormatter] Preview error:", e);
         return { ok: false, info: e.message || "Error creating preview" };
@@ -1927,10 +2946,16 @@
 
         if (!beforeText.trim()) return { ok: false, info: "Clipboard was empty." };
 
-        const { text: normalizedText, changeList } = TermNormalizer.normalize(beforeText);
-        const formattedHtml = TextFormatter.buildFormattedHtmlFromText(normalizedText);
+        const { text: normalizedText, auditText, changeList } = TermNormalizer.normalize(beforeText);
+        const formattedHtml = TextFormatter.buildAuditHtmlFromText(auditText);
 
-        return await this._showPreviewAndApply({ beforeText, normalizedText, formattedHtml, changeList });
+        return await this._showPreviewAndApply({
+          beforeText,
+          normalizedText,
+          auditText,
+          formattedHtml,
+          changeList,
+        });
       } catch (e) {
         console.error("[PatchNoteFormatter] Clipboard preview error:", e);
         return { ok: false, info: e.message || "Error processing clipboard" };
