@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Daily Cap Calculator - Melon Local (Enhanced)
 // @namespace    https://thepatch.melonlocal.com/
-// @version      3.7.7
+// @version      3.7.8
 // @description  Paces budgets evenly through end of month. Auto-fills from page data. Refresh + Freeze. Enhanced with auto-save, export/import, keyboard shortcuts, and improved UX.
 // @author       Melon Local
 // @match        https://thepatch.melonlocal.com/*
@@ -169,7 +169,9 @@
   function dockUnregister() {
     DockManager.unregister(PANEL_ID);
     const el = document.getElementById(PANEL_ID);
-    if (el) el.style.right = '';
+    // Restore the default floating position. Clearing to '' would leave
+    // right:auto, which puts a fixed-position element at the left edge.
+    if (el) el.style.right = '24px';
   }
 
   // ============================================================================
