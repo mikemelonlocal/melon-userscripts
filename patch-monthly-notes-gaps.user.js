@@ -1,21 +1,27 @@
 // ==UserScript==
 // @name         Patch Monthly Notes Gaps
 // @namespace    http://tampermonkey.net/
-// @version      1.0.6
+// @version      1.0.8
 // @description  On the Patch Calls grid, identify months missing a final-status call (Completed, Canceled, Agent No Show) for a given year by title, and bulk-archive calls for that year by title. Uses the Melon color palette and only appears on the Calls tab.
+// @author       Melon Local
 // @match        https://thepatch.melonlocal.com/Agents/Dashboard/*
 // @match        https://thepatch.melonlocal.com/agents/dashboard/*
 // @run-at       document-end
 // @grant        none
+// @noframes
 // @updateURL    https://raw.githubusercontent.com/mikemelonlocal/melon-userscripts/main/patch-monthly-notes-gaps.user.js
 // @downloadURL  https://raw.githubusercontent.com/mikemelonlocal/melon-userscripts/main/patch-monthly-notes-gaps.user.js
+// @supportURL   https://github.com/mikemelonlocal/melon-userscripts/issues
+// @homepageURL  https://github.com/mikemelonlocal/melon-userscripts
 // ==/UserScript==
 
 (function () {
   "use strict";
 
-  // Keep in sync with @version in the metadata block above.
-  const VERSION = "monthly-notes-gaps-v1.0.6";
+  // Keep CURRENT_VERSION in sync with @version in the metadata block above.
+  // VERSION is the human-readable tag used in console logs and window export.
+  const CURRENT_VERSION = "1.0.8";
+  const VERSION = `monthly-notes-gaps-v${CURRENT_VERSION}`;
 
   // -----------------------------
   // CONFIG
@@ -28,8 +34,16 @@
   const ARCHIVE_BUTTON_POLL_MS = 50;
   const TOAST_TIMEOUT_MS = 8000;
 
+  // Auto-update: lightweight in-panel notice that complements Tampermonkey's
+  // own update mechanism (driven by @updateURL / @downloadURL above).
+  const REMOTE_SCRIPT_URL =
+    "https://raw.githubusercontent.com/mikemelonlocal/melon-userscripts/main/patch-monthly-notes-gaps.user.js";
+  const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6 hours
+
   const UI_POS_KEY = "patchMonthlyNotesGaps_uiPos_v1";
   const UI_MIN_KEY = "patchMonthlyNotesGaps_uiMin_v1";
+  const UPDATE_CHECK_KEY = "patchMonthlyNotesGaps_lastUpdateCheck_v1";
+  const UPDATE_LATEST_KEY = "patchMonthlyNotesGaps_latestVersion_v1";
 
   const MONTH_NAMES = [
     "january", "february", "march", "april", "may", "june",
@@ -39,6 +53,7 @@
     "January", "February", "March", "April", "May", "June",
     "July", "August", "September", "October", "November", "December"
   ];
+  const MONTH_INITIALS = ["J", "F", "M", "A", "M", "J", "J", "A", "S", "O", "N", "D"];
   const MONTH_REGEX = new RegExp(`\\b(${MONTH_NAMES.join("|")})\\b`, "i");
   const YEAR_REGEX = /\b(\d{4})\b/;
 
@@ -72,14 +87,78 @@
     return m ? Number(m[1]) : null;
   }
 
+  /**
+   * Resilient row scraper. Filters Kendo grid for data rows only:
+   * - Must have role="row" (Kendo's standard for data + header rows)
+   * - Excludes grouping rows
+   * - Excludes anything inside a <thead> (column headers, filter rows)
+   */
   function getDashboardRows() {
     try {
-      return Array.from(
-        document.querySelectorAll("tr.k-table-row.k-master-row, tr.k-master-row")
+      const rows = Array.from(
+        document.querySelectorAll('tr[role="row"]:not(.k-grouping-row)')
       );
+      return rows.filter((row) => !row.closest("thead"));
     } catch (e) {
       console.error("[PatchMonthlyNotesGaps] Error getting rows:", e);
       return [];
+    }
+  }
+
+  // -----------------------------
+  // Auto-update helpers
+  // -----------------------------
+  /**
+   * Numeric semver compare. Returns 1 if a > b, -1 if a < b, 0 if equal.
+   * Non-numeric segments are coerced to 0, which is fine for our X.Y.Z scheme.
+   */
+  function compareVersions(a, b) {
+    const pa = String(a).split(".").map((n) => parseInt(n, 10) || 0);
+    const pb = String(b).split(".").map((n) => parseInt(n, 10) || 0);
+    const len = Math.max(pa.length, pb.length);
+    for (let i = 0; i < len; i++) {
+      const x = pa[i] || 0;
+      const y = pb[i] || 0;
+      if (x > y) return 1;
+      if (x < y) return -1;
+    }
+    return 0;
+  }
+
+  /**
+   * Best-effort fetch of the remote script's @version. Returns the remote
+   * version string if it's strictly newer than CURRENT_VERSION; otherwise null.
+   * Rate-limited via localStorage so we don't hammer GitHub on every UI mount.
+   */
+  async function checkForUpdate() {
+    try {
+      const lastRaw = localStorage.getItem(UPDATE_CHECK_KEY);
+      const last = lastRaw ? parseInt(lastRaw, 10) : 0;
+      const cached = localStorage.getItem(UPDATE_LATEST_KEY);
+
+      // If we checked recently, return whatever we cached.
+      if (last && Date.now() - last < UPDATE_CHECK_INTERVAL_MS) {
+        if (cached && compareVersions(cached, CURRENT_VERSION) > 0) return cached;
+        return null;
+      }
+
+      const res = await fetch(REMOTE_SCRIPT_URL, { cache: "no-cache" });
+      if (!res.ok) return null;
+      const text = await res.text();
+
+      // Only look in the metadata block to avoid matching the VERSION constant.
+      const meta = text.split("==/UserScript==")[0] || "";
+      const m = meta.match(/@version\s+(\S+)/);
+      if (!m) return null;
+      const remote = m[1];
+
+      localStorage.setItem(UPDATE_CHECK_KEY, String(Date.now()));
+      localStorage.setItem(UPDATE_LATEST_KEY, remote);
+
+      return compareVersions(remote, CURRENT_VERSION) > 0 ? remote : null;
+    } catch (e) {
+      console.warn("[PatchMonthlyNotesGaps] Update check failed:", e);
+      return null;
     }
   }
 
@@ -247,8 +326,18 @@
     return years;
   }
 
+  /**
+   * Selects all rows whose title month/year matches `year`.
+   *
+   * Kendo-aware: clicks the row checkbox, dispatches `change`, AND adds the
+   * `.k-selected` class plus `aria-selected="true"` on the parent <tr> so the
+   * grid's bulk-action toolbar recognizes the selection.
+   *
+   * @returns {{count: number, months: Set<number>}}
+   */
   function selectCallsByTitleYear(year) {
     const rows = getDashboardRows();
+    const months = new Set();
     let matchCount = 0;
 
     for (const row of rows) {
@@ -264,16 +353,22 @@
         );
         if (checkbox && !checkbox.checked) {
           checkbox.click();
-          // Some grid frameworks listen for `change` rather than `click`.
           checkbox.dispatchEvent(new Event("change", { bubbles: true }));
-          matchCount++;
         }
+
+        // Sync Kendo's row-level selection state regardless of checkbox path,
+        // so bulk-action buttons treat these rows as selected.
+        row.classList.add("k-selected");
+        row.setAttribute("aria-selected", "true");
+
+        matchCount++;
+        months.add(info.month);
       } catch (e) {
         console.warn("[PatchMonthlyNotesGaps] Error selecting row:", e);
       }
     }
 
-    return matchCount;
+    return { count: matchCount, months };
   }
 
   function findArchiveButton() {
@@ -446,6 +541,38 @@
     sub.style.color = MELON_COLORS.pine;
     bodyWrap.appendChild(sub);
 
+    // Update-available banner (hidden until checkForUpdate() resolves with a
+    // newer version). Clicking the link opens the .user.js file directly so
+    // Tampermonkey's userscript-detector takes over and offers re-install.
+    const updateBanner = document.createElement("div");
+    updateBanner.style.display = "none";
+    updateBanner.style.marginTop = "2px";
+    updateBanner.style.padding = "6px 8px";
+    updateBanner.style.borderRadius = "4px";
+    updateBanner.style.fontSize = "11px";
+    updateBanner.style.lineHeight = "1.35";
+    updateBanner.style.background = "#FFFFFF";
+    updateBanner.style.border = `1px solid ${MELON_COLORS.cactus}`;
+    updateBanner.style.color = MELON_COLORS.pine;
+    bodyWrap.appendChild(updateBanner);
+
+    function showUpdateBanner(remoteVersion) {
+      updateBanner.textContent = "";
+      const label = document.createElement("span");
+      label.textContent = `Update available: v${remoteVersion} (you have v${CURRENT_VERSION}). `;
+      const link = document.createElement("a");
+      link.textContent = "Install";
+      link.href = REMOTE_SCRIPT_URL;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.style.color = MELON_COLORS.clover;
+      link.style.fontWeight = "700";
+      link.style.textDecoration = "underline";
+      updateBanner.appendChild(label);
+      updateBanner.appendChild(link);
+      updateBanner.style.display = "block";
+    }
+
     // Year controls
     const yearRow = document.createElement("div");
     yearRow.style.display = "flex";
@@ -474,6 +601,69 @@
     yearRow.appendChild(yearLabel);
     yearRow.appendChild(yearInput);
     bodyWrap.appendChild(yearRow);
+
+    // -----------------------------
+    // Heatmap: 4x3 grid of month squares
+    // -----------------------------
+    const heatmapWrap = document.createElement("div");
+    heatmapWrap.style.display = "grid";
+    heatmapWrap.style.gridTemplateColumns = "repeat(4, 1fr)";
+    heatmapWrap.style.gap = "4px";
+    heatmapWrap.style.marginTop = "4px";
+    heatmapWrap.title = "Month coverage. Click \"Check Missing Months\" to populate.";
+
+    const heatmapSquares = [];
+    for (let i = 0; i < 12; i++) {
+      const sq = document.createElement("div");
+      sq.textContent = MONTH_INITIALS[i];
+      sq.title = `${MONTH_LABELS[i]} — unknown`;
+      sq.dataset.month = String(i + 1);
+      sq.style.background = MELON_COLORS.sand;
+      sq.style.color = "#FFFFFF";
+      sq.style.fontWeight = "700";
+      sq.style.fontSize = "11px";
+      sq.style.textAlign = "center";
+      sq.style.padding = "6px 0";
+      sq.style.borderRadius = "3px";
+      sq.style.userSelect = "none";
+      sq.style.transition = "background 0.15s ease";
+      heatmapWrap.appendChild(sq);
+      heatmapSquares.push(sq);
+    }
+    bodyWrap.appendChild(heatmapWrap);
+
+    /**
+     * Paint heatmap state.
+     * @param {Set<number>|null} foundMonths
+     *   - Set of months 1-12 that have a final-stage call. Missing months are
+     *     filled with cranberry. Null/undefined means "no data scanned" so all
+     *     12 squares are treated as missing.
+     */
+    function paintHeatmap(foundMonths) {
+      for (let i = 0; i < 12; i++) {
+        const month = i + 1;
+        const sq = heatmapSquares[i];
+        if (foundMonths && foundMonths.has(month)) {
+          sq.style.background = MELON_COLORS.clover;
+          sq.title = `${MONTH_LABELS[i]} — found`;
+        } else {
+          sq.style.background = MELON_COLORS.cranberry;
+          sq.title = `${MONTH_LABELS[i]} — missing`;
+        }
+      }
+    }
+
+    function resetHeatmap() {
+      for (let i = 0; i < 12; i++) {
+        const sq = heatmapSquares[i];
+        sq.style.background = MELON_COLORS.sand;
+        sq.title = `${MONTH_LABELS[i]} — unknown`;
+      }
+    }
+
+    // Reset to "unknown" whenever the user changes the year, since stale colors
+    // would lie about the new year's coverage.
+    yearInput.addEventListener("input", resetHeatmap);
 
     // Inline, non-blocking status / toast area
     const statusEl = document.createElement("div");
@@ -540,7 +730,10 @@
           }
 
           const yearsMap = getGridFinalMonthsByYear();
-          const monthSet = yearsMap[yearVal];
+          const monthSet = yearsMap[yearVal] || null;
+
+          // Paint the heatmap regardless of outcome.
+          paintHeatmap(monthSet);
 
           if (!monthSet) {
             showToast(
@@ -590,7 +783,7 @@
             return;
           }
 
-          const count = selectCallsByTitleYear(yearVal);
+          const { count, months } = selectCallsByTitleYear(yearVal);
           if (!count) {
             showToast(
               `No calls found for ${yearVal} by title on this page for agent ${agentId}.`,
@@ -599,10 +792,18 @@
             return;
           }
 
-          // Destructive action: keep confirm() as an explicit user-intent gate.
-          const confirmArchive = confirm(
-            `Archive ${count} call(s) for ${yearVal} for agent ${agentId}?`
-          );
+          // Audit summary breakdown.
+          const monthList = [...months]
+            .sort((a, b) => a - b)
+            .map((m) => MONTH_LABELS[m - 1].slice(0, 3))
+            .join(", ");
+          const rowWord = count === 1 ? "row" : "rows";
+          const auditMsg =
+            `I found ${count} ${rowWord} for ${yearVal}.\n` +
+            `Months covered: ${monthList || "—"}.\n\n` +
+            `Archive these ${count} ${rowWord}?`;
+
+          const confirmArchive = confirm(auditMsg);
           if (!confirmArchive) {
             showToast("Archive canceled.", "info");
             return;
@@ -618,7 +819,7 @@
           }
           try {
             archiveBtn.click();
-            showToast(`Archive requested for ${count} call(s) in ${yearVal}.`, "success");
+            showToast(`Archive requested for ${count} ${rowWord} in ${yearVal}.`, "success");
           } catch (e) {
             console.error("[PatchMonthlyNotesGaps] Error clicking archive:", e);
             showToast(`Archive click failed: ${e.message}`, "error");
@@ -673,6 +874,16 @@
     document.addEventListener("keydown", escKeydownHandler);
 
     applyMinState();
+
+    // Kick off a non-blocking update check. If a newer version is published
+    // at REMOTE_SCRIPT_URL, surface an in-panel banner. Tampermonkey itself
+    // also handles updates via @updateURL/@downloadURL on its own schedule;
+    // this just gives the user a faster signal inside the panel.
+    checkForUpdate().then((remote) => {
+      if (remote && document.body.contains(box)) {
+        showUpdateBanner(remote);
+      }
+    });
   }
 
   function removeUi() {
@@ -715,7 +926,7 @@
 
   // Event-driven SPA navigation detection: patch pushState/replaceState so we
   // get notified on programmatic route changes, plus popstate and hashchange
-  // for back/forward and hash edits. Replaces the previous setInterval poll.
+  // for back/forward and hash edits.
   (function patchHistoryForLocationChange() {
     const EVENT_NAME = "patch-mng-locationchange";
     const emit = () => window.dispatchEvent(new Event(EVENT_NAME));
