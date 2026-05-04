@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Microsoft Ads - Dismiss All Recommendations
 // @namespace    http://tampermonkey.net/
-// @version      2.0
+// @version      2.1
 // @description  Adds a "Dismiss All" button to the Microsoft Advertising recommendations page, with progress bar, negative-keyword guard, and Fluent UI toast feedback.
 // @author       You
 // @match        https://ui.ads.microsoft.com/*
@@ -14,17 +14,20 @@
 (function () {
   'use strict';
 
-  console.info('[DismissAll] userscript loaded (v2.0)');
+  console.info('[DismissAll] userscript loaded (v2.1)');
 
   // ---------------------------------------------------------------------------
   // Constants
   // ---------------------------------------------------------------------------
 
   // Microsoft A/B-tests button labels. Anywhere we identify a control by text,
-  // accept any of these synonyms (compared case-insensitively).
+  // accept any of these synonyms (compared case-insensitively, EXACT match).
+  // IMPORTANT: do NOT include 'Apply' in SUBMIT — Microsoft Ads recommendation
+  // cards have "Apply all" buttons that do the opposite of dismissing. Likewise
+  // 'Yes' alone is too ambiguous (used by other confirmation dialogs).
   const TEXTS = {
-    DISMISS_MENU_ITEM: ['Dismiss all', 'Dismiss', 'Dismiss recommendation', 'Discard'],
-    SUBMIT:            ['Submit', 'Confirm', 'OK', 'Apply', 'Save', 'Done'],
+    DISMISS_MENU_ITEM: ['Dismiss all', 'Dismiss', 'Dismiss recommendation', 'Discard', 'Discard all'],
+    SUBMIT:            ['Submit', 'Confirm', 'OK', 'Done', 'Save'],
     CLOSE:             ['Close', 'Cancel'],
   };
 
@@ -60,15 +63,19 @@
 
   /**
    * Same as waitFor, but matches against any of `texts` (case-insensitive,
-   * trimmed). This is the resilience layer for Microsoft's UI A/B variants.
-   * `extraFilter` lets callers add constraints like `b => !b.disabled`.
+   * EXACT match after trim). This is the resilience layer for Microsoft's UI
+   * A/B variants. `extraFilter` lets callers add constraints like `!disabled`.
+   *
+   * Exact match (no prefix matching) is intentional: prefix matching let
+   * "Apply" match "Apply all" buttons elsewhere on the page, triggering
+   * the wrong action.
    */
   async function waitForByText(selector, texts, timeout = 3000, extraFilter = null) {
     const lowered = texts.map(t => t.toLowerCase());
     return waitFor(selector, el => {
       if (extraFilter && !extraFilter(el)) return false;
       const t = (el.textContent || '').trim().toLowerCase();
-      return lowered.some(want => t === want || t.startsWith(want));
+      return lowered.includes(t);
     }, timeout);
   }
 
@@ -308,12 +315,23 @@
   // Core dismissal flow
   // ---------------------------------------------------------------------------
 
+  /**
+   * Returns a CSS selector scoped to inside an open dialog, so we never
+   * accidentally pick up buttons elsewhere on the page (e.g., "Apply all"
+   * buttons on other cards).
+   */
+  function dialogScoped(innerSelector) {
+    const scopes = ['[role="dialog"]', '.ms-Dialog', '.modal', '.ms-Modal'];
+    return scopes.map(s => s + ' ' + innerSelector).join(', ');
+  }
+
   async function dismissOneCard(moreBtn) {
     if (!moreBtn) return false;
     moreBtn.click();
 
+    // Menu item: scope to actual menu containers; never plain `button`.
     const dismissBtn = await waitForByText(
-      'button.btn-link.btn-block, [role="menuitem"], button',
+      'button.btn-link.btn-block, [role="menuitem"], [role="menu"] button, .ms-ContextualMenu button',
       TEXTS.DISMISS_MENU_ITEM,
       3000
     );
@@ -327,14 +345,22 @@
     const radio = await waitFor('div.radio input[type="radio"], input[type="radio"]');
     if (!radio) {
       console.debug('[DismissAll] dismiss-reason radio not found');
+      pressEscape();
       return false;
     }
     radio.click();
 
-    // Try class-based submit first (cheapest), then fall back to text matching.
+    // Submit: try class-based first, then fall back to text matching INSIDE
+    // an open dialog only. Never search the whole page — too many "Apply all"
+    // and "Yes" buttons on Microsoft Ads cards that would trigger wrong actions.
     let submitBtn = await waitFor('button.submit, button[type="submit"]', b => !b.disabled, 1500);
     if (!submitBtn) {
-      submitBtn = await waitForByText('button', TEXTS.SUBMIT, 2000, b => !b.disabled);
+      submitBtn = await waitForByText(
+        dialogScoped('button'),
+        TEXTS.SUBMIT,
+        2000,
+        b => !b.disabled
+      );
     }
     if (!submitBtn) {
       console.debug('[DismissAll] submit button not found (tried texts:', TEXTS.SUBMIT, ')');
