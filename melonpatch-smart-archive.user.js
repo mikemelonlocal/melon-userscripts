@@ -1,10 +1,12 @@
 // ==UserScript==
 // @name         MelonPatch Smart Archive
 // @namespace    https://thepatch.melonlocal.com/
-// @version      1.1.0
-// @description  Adds a "Smart Archive" button next to the Archive button on the Tasks page. Lets you choose to archive Done, Unsuccessful, or both statuses in one click. v1.1.0: pagination-aware, hold-to-confirm, optimistic removal, inline error state.
+// @version      1.1.1
+// @description  Adds a "Smart Archive" button next to the Archive button on the Tasks page. Lets you choose to archive Done, Unsuccessful, or both statuses in one click. v1.1.1: also runs on /Tasks/MyTasks and /Tasks/TaskSearch.
 // @author       MelonLocal
 // @match        https://thepatch.melonlocal.com/Agents/Dashboard/*
+// @match        https://thepatch.melonlocal.com/Tasks/MyTasks*
+// @match        https://thepatch.melonlocal.com/Tasks/TaskSearch*
 // @grant        none
 // @updateURL    https://raw.githubusercontent.com/mikemelonlocal/melon-userscripts/main/melonpatch-smart-archive.user.js
 // @downloadURL  https://raw.githubusercontent.com/mikemelonlocal/melon-userscripts/main/melonpatch-smart-archive.user.js
