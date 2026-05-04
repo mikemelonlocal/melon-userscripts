@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         MelonPatch Smart Archive
 // @namespace    https://thepatch.melonlocal.com/
-// @version      1.0
-// @description  Adds a "Smart Archive" button next to the Archive button on the Tasks page. Lets you choose to archive Done, Unsuccessful, or both statuses in one click.
+// @version      1.1.0
+// @description  Adds a "Smart Archive" button next to the Archive button on the Tasks page. Lets you choose to archive Done, Unsuccessful, or both statuses in one click. v1.1.0: pagination-aware, hold-to-confirm, optimistic removal, inline error state.
 // @author       MelonLocal
 // @match        https://thepatch.melonlocal.com/Agents/Dashboard/*
 // @grant        none
@@ -14,27 +14,28 @@
   'use strict';
 
   // ─── Config ────────────────────────────────────────────────────────────────
-  const BUTTON_ID  = 'smart-archive-btn';
-  const WRAPPER_ID = 'smart-archive-wrapper';
-  const MODAL_ID   = 'smart-archive-modal';
+  const BUTTON_ID         = 'smart-archive-btn';
+  const WRAPPER_ID        = 'smart-archive-wrapper';
+  const MODAL_ID          = 'smart-archive-modal';
+  const HOLD_DURATION_MS  = 1500;
+  const BRAND_GREEN       = '#2d6a4f';
+  const BRAND_GREEN_DARK  = '#1f4f39';
 
   // ─── Inject CSS ────────────────────────────────────────────────────────────
   const style = document.createElement('style');
   style.textContent = `
-    #${WRAPPER_ID} {
-      order: -4;          /* Sit alongside the other toolbar buttons */
-    }
+    #${WRAPPER_ID} { order: -4; }
 
     #${BUTTON_ID} {
-      background-color: #2d6a4f !important;
+      background-color: ${BRAND_GREEN} !important;
       color: #fff !important;
-      border-color:  #2d6a4f !important;
+      border-color:  ${BRAND_GREEN} !important;
       font-family: Poppins, sans-serif;
       cursor: pointer;
     }
     #${BUTTON_ID}:hover {
-      background-color: #1f4f39 !important;
-      border-color: #1f4f39 !important;
+      background-color: ${BRAND_GREEN_DARK} !important;
+      border-color: ${BRAND_GREEN_DARK} !important;
     }
 
     /* ── Modal overlay ── */
@@ -47,9 +48,7 @@
       align-items: center;
       justify-content: center;
     }
-    #${MODAL_ID}-overlay.sa-open {
-      display: flex;
-    }
+    #${MODAL_ID}-overlay.sa-open { display: flex; }
 
     /* ── Modal box ── */
     #${MODAL_ID} {
@@ -57,7 +56,7 @@
       border-radius: 12px;
       box-shadow: 0 8px 32px rgba(0,0,0,.22);
       padding: 28px 32px 24px;
-      width: 400px;
+      width: 420px;
       font-family: Poppins, sans-serif;
       position: relative;
       z-index: 99999;
@@ -77,12 +76,12 @@
       margin-bottom: 20px;
     }
 
-    /* ── Checkboxes ── */
+    /* ── Status checkboxes ── */
     #${MODAL_ID} .sa-options {
       display: flex;
       flex-direction: column;
       gap: 10px;
-      margin-bottom: 22px;
+      margin-bottom: 14px;
     }
     #${MODAL_ID} .sa-option {
       display: flex;
@@ -96,19 +95,18 @@
       user-select: none;
     }
     #${MODAL_ID} .sa-option:hover {
-      border-color: #2d6a4f;
+      border-color: ${BRAND_GREEN};
       background: #f0faf5;
     }
-    #${MODAL_ID} .sa-option input[type=checkbox] {
+    #${MODAL_ID} .sa-option input[type=checkbox],
+    #${MODAL_ID} .sa-scope input[type=checkbox] {
       width: 16px;
       height: 16px;
-      accent-color: #2d6a4f;
+      accent-color: ${BRAND_GREEN};
       cursor: pointer;
       flex-shrink: 0;
     }
-    #${MODAL_ID} .sa-option-label {
-      flex: 1;
-    }
+    #${MODAL_ID} .sa-option-label { flex: 1; }
     #${MODAL_ID} .sa-option-label strong {
       display: block;
       font-size: 14px;
@@ -128,22 +126,57 @@
     #${MODAL_ID} .sa-badge.done         { background: #d1fae5; color: #065f46; }
     #${MODAL_ID} .sa-badge.unsuccessful { background: #fee2e2; color: #991b1b; }
 
-    /* ── Preview count ── */
+    /* ── Pagination scope toggle ── */
+    #${MODAL_ID} .sa-scope {
+      display: none;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px;
+      border: 1.5px dashed #cdd5d0;
+      border-radius: 8px;
+      margin-bottom: 16px;
+      background: #fafafa;
+      user-select: none;
+      cursor: pointer;
+    }
+    #${MODAL_ID} .sa-scope.sa-shown { display: flex; }
+    #${MODAL_ID} .sa-scope-label { flex: 1; }
+    #${MODAL_ID} .sa-scope-label strong {
+      display: block;
+      font-size: 13px;
+      color: #1a1a1a;
+    }
+    #${MODAL_ID} .sa-scope-label span {
+      font-size: 11.5px;
+      color: #888;
+    }
+
+    /* ── Preview / status box ── */
     #${MODAL_ID} .sa-preview {
       font-size: 12.5px;
       color: #555;
       background: #f5f5f2;
+      border: 1.5px solid transparent;
       border-radius: 7px;
-      padding: 8px 12px;
+      padding: 10px 12px;
       margin-bottom: 20px;
       min-height: 34px;
       display: flex;
       align-items: center;
       gap: 6px;
+      transition: background .15s, color .15s, border-color .15s;
     }
-    #${MODAL_ID} .sa-preview.sa-warn { color: #b45309; background: #fffbeb; }
+    #${MODAL_ID} .sa-preview.sa-warn {
+      color: #b45309;
+      background: #fffbeb;
+    }
+    #${MODAL_ID} .sa-preview.sa-error {
+      color: #991b1b;
+      background: #fef2f2;
+      border-color: #dc2626;
+    }
 
-    /* ── Buttons ── */
+    /* ── Action buttons ── */
     #${MODAL_ID} .sa-actions {
       display: flex;
       gap: 10px;
@@ -160,48 +193,147 @@
       cursor: pointer;
     }
     #${MODAL_ID} .sa-cancel:hover { background: #f5f5f5; }
+
+    /* ── Hold-to-confirm button (progress fill) ── */
     #${MODAL_ID} .sa-confirm {
-      padding: 7px 20px;
+      position: relative;
+      overflow: hidden;
+      isolation: isolate;
+      padding: 7px 22px;
+      min-width: 140px;
       border: none;
       border-radius: 8px;
-      background: #2d6a4f;
+      background: ${BRAND_GREEN};
       color: #fff;
       font-family: Poppins, sans-serif;
       font-size: 13.5px;
       font-weight: 600;
       cursor: pointer;
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
     }
-    #${MODAL_ID} .sa-confirm:hover   { background: #1f4f39; }
+    #${MODAL_ID} .sa-confirm .sa-confirm-label {
+      position: relative;
+      z-index: 1;
+      pointer-events: none;
+    }
+    #${MODAL_ID} .sa-confirm::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: ${BRAND_GREEN_DARK};
+      transform: translateX(-100%);
+      transition: transform 180ms ease-out;
+      z-index: 0;
+    }
+    #${MODAL_ID} .sa-confirm.sa-holding::before {
+      transform: translateX(0);
+      transition: transform ${HOLD_DURATION_MS}ms linear;
+    }
     #${MODAL_ID} .sa-confirm:disabled {
       background: #a0a0a0;
       cursor: not-allowed;
     }
+    #${MODAL_ID} .sa-confirm:disabled::before { display: none; }
   `;
   document.head.appendChild(style);
 
   // ─── Helpers ───────────────────────────────────────────────────────────────
-
-  /** Return a count label: "4 tasks" or "1 task" */
   function taskWord(n) { return n === 1 ? '1 task' : n + ' tasks'; }
 
-  /** Get the Kendo grid instance (null if not ready) */
   function getGrid() {
     const el = document.getElementById('OpenTasksData');
     return el ? $(el).data('kendoGrid') : null;
   }
 
-  /** Get tasks from the grid matching the chosen statuses */
+  /** Tasks on the currently-loaded page only. */
   function getMatchingTasks(statuses) {
     const grid = getGrid();
     if (!grid) return [];
     return grid.dataSource.data().filter(t => statuses.includes(t.Status));
   }
 
-  /** Get the request-verification token */
+  /** True when the dataSource has more rows than fit in one page. */
+  function hasMultiplePages() {
+    const grid = getGrid();
+    if (!grid) return false;
+    const ds = grid.dataSource;
+    const total    = typeof ds.total    === 'function' ? ds.total()    : 0;
+    const pageSize = typeof ds.pageSize === 'function' ? ds.pageSize() : 0;
+    return pageSize > 0 && total > pageSize;
+  }
+
+  /**
+   * Fetch every task across all pages, return those whose Status matches.
+   * Temporarily widens pageSize to total(); the original pageSize is captured
+   * in `originalPaging` and restored after the archive POST resolves.
+   */
+  let originalPaging = null;
+  function fetchAllMatchingTasks(statuses) {
+    const grid = getGrid();
+    if (!grid) return Promise.resolve([]);
+    const ds = grid.dataSource;
+
+    // All data already client-side — no fetch needed.
+    if (ds.data().length >= ds.total()) {
+      return Promise.resolve(ds.data().filter(t => statuses.includes(t.Status)));
+    }
+
+    return new Promise((resolve, reject) => {
+      originalPaging = {
+        pageSize: ds.pageSize(),
+        page: ds.page()
+      };
+
+      const onChange = () => {
+        ds.unbind('change', onChange);
+        ds.unbind('error', onError);
+        resolve(ds.data().filter(t => statuses.includes(t.Status)));
+      };
+      const onError = (e) => {
+        ds.unbind('change', onChange);
+        ds.unbind('error', onError);
+        originalPaging = null;
+        reject(e || new Error('dataSource error'));
+      };
+      ds.bind('change', onChange);
+      ds.bind('error', onError);
+      ds.pageSize(ds.total());
+      ds.page(1);
+    });
+  }
+
+  /**
+   * After an archive completes, return the grid to its pre-fetch paging.
+   * Calling pageSize()/page() triggers a single re-read; if there's nothing
+   * to restore, fall back to a plain read() so the grid still refreshes.
+   */
+  function refreshGrid() {
+    const grid = getGrid();
+    if (!grid) return;
+    const ds = grid.dataSource;
+    if (originalPaging) {
+      const { pageSize, page } = originalPaging;
+      originalPaging = null;
+      ds.pageSize(pageSize);
+      // pageSize() resets to page 1 — restore the user's page if needed
+      if (page && page !== ds.page()) ds.page(page);
+    } else {
+      ds.read();
+    }
+  }
+
   function getRVT() {
     const el = document.querySelector('input[name="__RequestVerificationToken"]');
     return el ? el.value : null;
   }
+
+  // ─── Modal state ───────────────────────────────────────────────────────────
+  const modalState = {
+    holdTimer: null,
+    inFlight: false
+  };
 
   // ─── Build modal (once) ────────────────────────────────────────────────────
   function buildModal() {
@@ -212,7 +344,7 @@
     overlay.innerHTML = `
       <div id="${MODAL_ID}" role="dialog" aria-modal="true" aria-labelledby="sa-title">
         <h2 id="sa-title">🗂 Smart Archive</h2>
-        <p class="sa-subtitle">Select which task statuses to archive, then click Confirm.</p>
+        <p class="sa-subtitle">Select which task statuses to archive, then hold Confirm.</p>
 
         <div class="sa-options">
           <label class="sa-option" id="sa-opt-done">
@@ -234,39 +366,81 @@
           </label>
         </div>
 
+        <label class="sa-scope" id="sa-scope">
+          <input type="checkbox" id="sa-check-allpages" />
+          <div class="sa-scope-label">
+            <strong>Archive across all pages</strong>
+            <span id="sa-scope-detail">Includes matching tasks not currently visible</span>
+          </div>
+        </label>
+
         <div class="sa-preview" id="sa-preview">
           Select at least one status above.
         </div>
 
         <div class="sa-actions">
-          <button class="sa-cancel" id="sa-cancel">Cancel</button>
-          <button class="sa-confirm" id="sa-confirm" disabled>Archive</button>
+          <button class="sa-cancel" id="sa-cancel" type="button">Cancel</button>
+          <button class="sa-confirm" id="sa-confirm" type="button" disabled>
+            <span class="sa-confirm-label">Hold to Archive</span>
+          </button>
         </div>
       </div>
     `;
     document.body.appendChild(overlay);
 
-    // Close on overlay click
     overlay.addEventListener('click', (e) => {
       if (e.target === overlay) closeModal();
     });
 
-    // Close on Escape
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') closeModal();
     });
 
     document.getElementById('sa-cancel').addEventListener('click', closeModal);
-    document.getElementById('sa-confirm').addEventListener('click', runArchive);
 
-    // Live-update counts whenever a checkbox changes
-    ['sa-check-done', 'sa-check-unsuccessful'].forEach(id => {
+    ['sa-check-done', 'sa-check-unsuccessful', 'sa-check-allpages'].forEach(id => {
       document.getElementById(id).addEventListener('change', updatePreview);
     });
+
+    setupHoldToConfirm();
   }
 
+  // ─── Hold-to-confirm wiring ────────────────────────────────────────────────
+  function setupHoldToConfirm() {
+    const btn = document.getElementById('sa-confirm');
+
+    const start = (e) => {
+      if (btn.disabled || modalState.inFlight) return;
+      e.preventDefault();
+      btn.classList.add('sa-holding');
+      modalState.holdTimer = setTimeout(() => {
+        modalState.holdTimer = null;
+        btn.classList.remove('sa-holding');
+        runArchive();
+      }, HOLD_DURATION_MS);
+    };
+
+    const cancel = () => {
+      if (modalState.holdTimer) {
+        clearTimeout(modalState.holdTimer);
+        modalState.holdTimer = null;
+      }
+      btn.classList.remove('sa-holding');
+    };
+
+    btn.addEventListener('mousedown', start);
+    btn.addEventListener('touchstart', start, { passive: false });
+    ['mouseup', 'mouseleave', 'touchend', 'touchcancel', 'blur'].forEach(ev =>
+      btn.addEventListener(ev, cancel)
+    );
+  }
+
+  // ─── Open / close ──────────────────────────────────────────────────────────
   function openModal() {
     buildModal();
+    document.getElementById('sa-check-allpages').checked = false;
+    setPreviewState('default');
+    resetConfirmButton();
     updatePreview();
     document.getElementById(MODAL_ID + '-overlay').classList.add('sa-open');
   }
@@ -274,59 +448,141 @@
   function closeModal() {
     const overlay = document.getElementById(MODAL_ID + '-overlay');
     if (overlay) overlay.classList.remove('sa-open');
+    if (modalState.holdTimer) {
+      clearTimeout(modalState.holdTimer);
+      modalState.holdTimer = null;
+    }
+    const btn = document.getElementById('sa-confirm');
+    if (btn) btn.classList.remove('sa-holding');
   }
 
-  /** Recalculate the per-status counts and update the preview line */
-  function updatePreview() {
-    const doneChecked   = document.getElementById('sa-check-done').checked;
-    const unsucChecked  = document.getElementById('sa-check-unsuccessful').checked;
+  function resetConfirmButton() {
+    const btn = document.getElementById('sa-confirm');
+    if (!btn) return;
+    btn.classList.remove('sa-holding');
+    const label = btn.querySelector('.sa-confirm-label');
+    if (label) label.textContent = 'Hold to Archive';
+  }
 
-    const doneTasks   = getMatchingTasks(['Done']);
-    const unsucTasks  = getMatchingTasks(['Unsuccessful']);
+  // ─── Preview / status box ──────────────────────────────────────────────────
+  function setPreviewState(state, message) {
+    const preview = document.getElementById('sa-preview');
+    if (!preview) return;
+    preview.classList.remove('sa-warn', 'sa-error');
+    if (state === 'warn')  preview.classList.add('sa-warn');
+    if (state === 'error') preview.classList.add('sa-error');
+    if (typeof message === 'string') preview.textContent = message;
+  }
+
+  function updatePreview() {
+    const grid = getGrid();
+    const scope = document.getElementById('sa-scope');
+    const allPagesCheckbox = document.getElementById('sa-check-allpages');
+    const showScope = hasMultiplePages();
+
+    scope.classList.toggle('sa-shown', showScope);
+    if (!showScope) allPagesCheckbox.checked = false;
+    const allPages = allPagesCheckbox.checked;
+
+    const doneChecked  = document.getElementById('sa-check-done').checked;
+    const unsucChecked = document.getElementById('sa-check-unsuccessful').checked;
+
+    const doneTasks  = getMatchingTasks(['Done']);
+    const unsucTasks = getMatchingTasks(['Unsuccessful']);
 
     document.getElementById('sa-count-done').textContent         = taskWord(doneTasks.length);
     document.getElementById('sa-count-unsuccessful').textContent = taskWord(unsucTasks.length);
 
-    const selected = [];
-    if (doneChecked)  selected.push(...doneTasks);
-    if (unsucChecked) selected.push(...unsucTasks);
+    if (grid && showScope) {
+      const total    = grid.dataSource.total();
+      const pageSize = grid.dataSource.pageSize();
+      const pages    = Math.ceil(total / pageSize);
+      document.getElementById('sa-scope-detail').textContent =
+        `${total} total tasks across ${pages} pages — only the current page is checked otherwise`;
+    }
 
-    const preview   = document.getElementById('sa-preview');
     const confirmBtn = document.getElementById('sa-confirm');
 
-    if (selected.length === 0) {
-      const reason = (!doneChecked && !unsucChecked)
-        ? 'Select at least one status above.'
+    if (!doneChecked && !unsucChecked) {
+      setPreviewState('warn', 'Select at least one status above.');
+      confirmBtn.disabled = true;
+      return;
+    }
+
+    if (allPages) {
+      setPreviewState(
+        'default',
+        '✔ All matching tasks across every page will be archived.'
+      );
+      confirmBtn.disabled = false;
+      return;
+    }
+
+    const selectedCount =
+      (doneChecked  ? doneTasks.length  : 0) +
+      (unsucChecked ? unsucTasks.length : 0);
+
+    if (selectedCount === 0) {
+      const msg = showScope
+        ? 'No matching tasks on this page. Toggle "across all pages" to widen the scope.'
         : 'No matching tasks found in the current view.';
-      preview.textContent = reason;
-      preview.classList.add('sa-warn');
+      setPreviewState('warn', msg);
       confirmBtn.disabled = true;
     } else {
-      preview.textContent = `✔ ${taskWord(selected.length)} will be archived.`;
-      preview.classList.remove('sa-warn');
+      setPreviewState('default', `✔ ${taskWord(selectedCount)} on this page will be archived.`);
       confirmBtn.disabled = false;
     }
   }
 
-  /** POST to BulkArchive then refresh the grid */
-  function runArchive() {
+  // ─── Archive flow ──────────────────────────────────────────────────────────
+  async function runArchive() {
+    if (modalState.inFlight) return;
+
     const statuses = [];
     if (document.getElementById('sa-check-done').checked)         statuses.push('Done');
     if (document.getElementById('sa-check-unsuccessful').checked) statuses.push('Unsuccessful');
+    if (!statuses.length) return;
 
-    const tasks = getMatchingTasks(statuses);
-    if (!tasks.length) return;
+    const allPages   = document.getElementById('sa-check-allpages').checked;
+    const confirmBtn = document.getElementById('sa-confirm');
+    const labelEl    = confirmBtn.querySelector('.sa-confirm-label');
+
+    modalState.inFlight = true;
+    confirmBtn.disabled = true;
+    labelEl.textContent = allPages ? 'Loading all pages…' : 'Archiving…';
+
+    let tasks;
+    try {
+      tasks = allPages
+        ? await fetchAllMatchingTasks(statuses)
+        : getMatchingTasks(statuses);
+    } catch (err) {
+      modalState.inFlight = false;
+      confirmBtn.disabled = false;
+      labelEl.textContent = 'Hold to Archive';
+      setPreviewState('error', 'Could not load tasks across pages — please try again.');
+      return;
+    }
+
+    if (!tasks.length) {
+      modalState.inFlight = false;
+      confirmBtn.disabled = false;
+      labelEl.textContent = 'Hold to Archive';
+      setPreviewState('warn', 'No matching tasks found.');
+      return;
+    }
 
     const rvt = getRVT();
     if (!rvt) {
-      alert('Security token not found — please refresh the page and try again.');
+      modalState.inFlight = false;
+      confirmBtn.disabled = false;
+      labelEl.textContent = 'Hold to Archive';
+      setPreviewState('error', 'Security token not found — please refresh the page and try again.');
       return;
     }
 
     const ids = tasks.map(t => t.TaskId);
-    const confirmBtn = document.getElementById('sa-confirm');
-    confirmBtn.disabled = true;
-    confirmBtn.textContent = 'Archiving…';
+    labelEl.textContent = `Archiving ${taskWord(ids.length)}…`;
 
     const xhr = new XMLHttpRequest();
     xhr.open('POST', '/Tasks/BulkArchive', true);
@@ -336,22 +592,37 @@
     xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
 
     xhr.onload = function () {
-      closeModal();
+      modalState.inFlight = false;
+      labelEl.textContent = 'Hold to Archive';
+
       if (xhr.status === 200) {
+        // Optimistic local cleanup so rows disappear immediately
         const grid = getGrid();
-        if (grid) grid.dataSource.read();
+        if (grid) {
+          tasks.forEach(t => {
+            try { grid.dataSource.remove(t); } catch (_) { /* item already gone */ }
+          });
+          refreshGrid();
+        }
+        confirmBtn.disabled = false;
+        closeModal();
       } else {
-        alert('Archive failed (HTTP ' + xhr.status + '). Please try again.');
+        confirmBtn.disabled = false;
+        setPreviewState(
+          'error',
+          `Archive failed (HTTP ${xhr.status}) — ${taskWord(ids.length)} could not be archived.`
+        );
       }
-      confirmBtn.disabled = false;
-      confirmBtn.textContent = 'Archive';
     };
 
     xhr.onerror = function () {
-      closeModal();
-      alert('Network error while archiving. Please try again.');
+      modalState.inFlight = false;
       confirmBtn.disabled = false;
-      confirmBtn.textContent = 'Archive';
+      labelEl.textContent = 'Hold to Archive';
+      setPreviewState(
+        'error',
+        `Network error — ${taskWord(ids.length)} could not be archived. Please try again.`
+      );
     };
 
     xhr.send(JSON.stringify(ids));
@@ -359,7 +630,6 @@
 
   // ─── Inject toolbar button ─────────────────────────────────────────────────
   function injectButton() {
-    // Only inject once
     if (document.getElementById(WRAPPER_ID)) return;
 
     const toolbar = document.querySelector('.k-grid-toolbar');
@@ -371,7 +641,6 @@
     const spacer = toolbar.querySelector('.k-spacer');
     if (!spacer) return;
 
-    // Wrapper mirrors the structure of other k-toolbar items
     const wrapper = document.createElement('div');
     wrapper.id = WRAPPER_ID;
     wrapper.className = 'k-toolbar-item';
@@ -388,26 +657,20 @@
     btn.addEventListener('click', openModal);
 
     wrapper.appendChild(btn);
-
-    // Insert before the spacer so it stays in the left button group,
-    // then use CSS order: -4 to sit alongside the other toolbar buttons
     toolbar.insertBefore(wrapper, spacer);
     wrapper.style.order = '-4';
   }
 
-  // ─── Watch for the toolbar to appear (it loads after the Tasks tab click) ──
+  // ─── Watch for the toolbar to appear (loads after the Tasks tab click) ─────
   function waitForToolbar() {
-    // If the toolbar is already present, inject immediately
     if (document.querySelector('.k-grid-toolbar .tasks_bulk_archive')) {
       injectButton();
       return;
     }
 
-    // Otherwise observe the DOM for it
     const observer = new MutationObserver(() => {
       if (document.querySelector('.k-grid-toolbar .tasks_bulk_archive')) {
         injectButton();
-        // Keep observing in case the grid is re-rendered (e.g. tab switch)
       }
     });
 
