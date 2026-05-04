@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Microsoft Ads - Dismiss All Recommendations
 // @namespace    http://tampermonkey.net/
-// @version      2.1
+// @version      2.2
 // @description  Adds a "Dismiss All" button to the Microsoft Advertising recommendations page, with progress bar, negative-keyword guard, and Fluent UI toast feedback.
 // @author       You
 // @match        https://ui.ads.microsoft.com/*
@@ -14,7 +14,7 @@
 (function () {
   'use strict';
 
-  console.info('[DismissAll] userscript loaded (v2.1)');
+  console.info('[DismissAll] userscript loaded (v2.2)');
 
   // ---------------------------------------------------------------------------
   // Constants
@@ -22,14 +22,37 @@
 
   // Microsoft A/B-tests button labels. Anywhere we identify a control by text,
   // accept any of these synonyms (compared case-insensitively, EXACT match).
-  // IMPORTANT: do NOT include 'Apply' in SUBMIT — Microsoft Ads recommendation
-  // cards have "Apply all" buttons that do the opposite of dismissing. Likewise
-  // 'Yes' alone is too ambiguous (used by other confirmation dialogs).
   const TEXTS = {
     DISMISS_MENU_ITEM: ['Dismiss all', 'Dismiss', 'Dismiss recommendation', 'Discard', 'Discard all'],
-    SUBMIT:            ['Submit', 'Confirm', 'OK', 'Done', 'Save'],
     CLOSE:             ['Close', 'Cancel'],
   };
+
+  // Hard guardrail: the script must NEVER click any button whose text matches
+  // these patterns, even by accident. "Apply" / "Apply all" on Microsoft Ads
+  // cards APPLIES the recommendation (the opposite of dismissing). "Yes" is
+  // used by a confirm-apply dialog. Any safeClick() call is rejected if the
+  // target's text matches.
+  const FORBIDDEN_TEXTS = /^(apply|apply all|apply recommendation|apply now|yes)$/i;
+
+  /**
+   * Click `el` only after verifying its text is not on the forbidden list.
+   * Returns true on click, false if blocked or `el` is null. Logs loudly on
+   * a block so we notice if our selectors ever drift.
+   */
+  function safeClick(el, context) {
+    if (!el) return false;
+    const text = (el.textContent || '').trim();
+    if (FORBIDDEN_TEXTS.test(text)) {
+      console.error(
+        '[DismissAll] BLOCKED click on forbidden button:',
+        JSON.stringify(text),
+        'context:', context
+      );
+      return false;
+    }
+    el.click();
+    return true;
+  }
 
   // CSS-in-JS-resistant overrides — Microsoft's stylesheets are aggressive.
   const HIGHLIGHT_OUTLINE = '4px solid #d13438';
@@ -315,16 +338,6 @@
   // Core dismissal flow
   // ---------------------------------------------------------------------------
 
-  /**
-   * Returns a CSS selector scoped to inside an open dialog, so we never
-   * accidentally pick up buttons elsewhere on the page (e.g., "Apply all"
-   * buttons on other cards).
-   */
-  function dialogScoped(innerSelector) {
-    const scopes = ['[role="dialog"]', '.ms-Dialog', '.modal', '.ms-Modal'];
-    return scopes.map(s => s + ' ' + innerSelector).join(', ');
-  }
-
   async function dismissOneCard(moreBtn) {
     if (!moreBtn) return false;
     moreBtn.click();
@@ -340,7 +353,10 @@
       pressEscape();
       return false;
     }
-    dismissBtn.click();
+    if (!safeClick(dismissBtn, 'dismiss menu item')) {
+      pressEscape();
+      return false;
+    }
 
     const radio = await waitFor('div.radio input[type="radio"], input[type="radio"]');
     if (!radio) {
@@ -348,28 +364,29 @@
       pressEscape();
       return false;
     }
-    radio.click();
+    radio.click(); // input[type=radio] has no text — direct click is safe.
 
-    // Submit: try class-based first, then fall back to text matching INSIDE
-    // an open dialog only. Never search the whole page — too many "Apply all"
-    // and "Yes" buttons on Microsoft Ads cards that would trigger wrong actions.
-    let submitBtn = await waitFor('button.submit, button[type="submit"]', b => !b.disabled, 1500);
+    // Submit: STRICT selector only. No text fallback — Microsoft Ads has too
+    // many ambiguous buttons (Apply, Apply all, Yes) on the same page, and a
+    // wrong click would apply a recommendation instead of dismiss it. If the
+    // class selector fails, abort and close the dialog.
+    const submitBtn = await waitFor(
+      'button.submit, button[type="submit"]',
+      b => !b.disabled,
+      3000
+    );
     if (!submitBtn) {
-      submitBtn = await waitForByText(
-        dialogScoped('button'),
-        TEXTS.SUBMIT,
-        2000,
-        b => !b.disabled
-      );
-    }
-    if (!submitBtn) {
-      console.debug('[DismissAll] submit button not found (tried texts:', TEXTS.SUBMIT, ')');
+      console.debug('[DismissAll] submit button (strict selector) not found — aborting card');
       document.querySelector('button[aria-label*="Close"], .ms-Dialog-button--close')?.click();
+      pressEscape();
       return false;
     }
 
     const beforeCount = document.querySelectorAll('button.iconba-More').length;
-    submitBtn.click();
+    if (!safeClick(submitBtn, 'submit dismiss')) {
+      pressEscape();
+      return false;
+    }
     await waitForCondition(
       () => document.querySelectorAll('button.iconba-More').length < beforeCount,
       5000
