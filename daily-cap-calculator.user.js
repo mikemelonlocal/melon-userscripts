@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Daily Cap Calculator - Melon Local (Enhanced)
 // @namespace    https://thepatch.melonlocal.com/
-// @version      3.7.8
+// @version      3.7.9
 // @description  Paces budgets evenly through end of month. Auto-fills from page data. Refresh + Freeze. Enhanced with auto-save, export/import, keyboard shortcuts, and improved UX.
 // @author       Melon Local
 // @match        https://thepatch.melonlocal.com/*
@@ -169,9 +169,10 @@
   function dockUnregister() {
     DockManager.unregister(PANEL_ID);
     const el = document.getElementById(PANEL_ID);
-    // Restore the default floating position. Clearing to '' would leave
-    // right:auto, which puts a fixed-position element at the left edge.
-    if (el) el.style.right = '24px';
+    // Clear the JS-set right so the CSS rule (right: 24px) takes over.
+    // Do NOT set '' on position:fixed without a CSS fallback — that leaves
+    // right:auto which puts the panel at the left edge of the viewport.
+    if (el) el.style.right = '';
   }
 
   // ============================================================================
@@ -249,6 +250,13 @@
   // ============================================================================
 
   const CSS = `
+    /* Panel default (floating) position — JS overrides right when docked */
+    #daily-cap-calculator {
+      position: fixed;
+      right: 24px;
+      bottom: 24px;
+    }
+
     /* Reset & Base */
     #daily-cap-calculator * {
       box-sizing: border-box;
