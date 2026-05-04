@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Daily Cap Calculator - Melon Local (Enhanced)
 // @namespace    https://thepatch.melonlocal.com/
-// @version      3.7.9
+// @version      3.8.0
 // @description  Paces budgets evenly through end of month. Auto-fills from page data. Refresh + Freeze. Enhanced with auto-save, export/import, keyboard shortcuts, and improved UX.
 // @author       Melon Local
 // @match        https://thepatch.melonlocal.com/*
@@ -158,21 +158,21 @@
   const PANEL_WIDTH = 460;
 
   // Helper: register this panel with a live onLayout callback.
+  // Sets --dcc-dock-right so the CSS rule resolves to the registry offset.
   function dockRegister() {
     DockManager.register(PANEL_ID, PANEL_WIDTH, (offset) => {
       const el = document.getElementById(PANEL_ID);
-      if (el) el.style.right = offset + 'px';
+      if (el) el.style.setProperty('--dcc-dock-right', offset + 'px');
     });
   }
 
-  // Helper: unregister and reset this panel's inline right value.
+  // Helper: unregister and remove the custom property.
+  // Removing --dcc-dock-right causes right: var(--dcc-dock-right, 24px) to
+  // resolve to the fallback 24px — no inline right fighting the cascade.
   function dockUnregister() {
     DockManager.unregister(PANEL_ID);
     const el = document.getElementById(PANEL_ID);
-    // Clear the JS-set right so the CSS rule (right: 24px) takes over.
-    // Do NOT set '' on position:fixed without a CSS fallback — that leaves
-    // right:auto which puts the panel at the left edge of the viewport.
-    if (el) el.style.right = '';
+    if (el) el.style.removeProperty('--dcc-dock-right');
   }
 
   // ============================================================================
@@ -250,10 +250,14 @@
   // ============================================================================
 
   const CSS = `
-    /* Panel default (floating) position — JS overrides right when docked */
+    /* Panel position — right is driven by --dcc-dock-right custom property.
+       Default (24px) applies when undocked; dockRegister() sets the property
+       to the registry-computed offset. Removing the property restores 24px.
+       Using a custom property means there is no inline right to fight with;
+       the cascade always resolves through here. */
     #daily-cap-calculator {
       position: fixed;
-      right: 24px;
+      right: var(--dcc-dock-right, 24px);
       bottom: 24px;
     }
 
@@ -2384,7 +2388,7 @@
 
     // Create HTML
     const calculatorHTML = `
-      <div id="daily-cap-calculator" style="position:fixed;bottom:24px;right:24px;width:460px;background:#fff;border-radius:12px;box-shadow:0 8px 32px rgba(0,0,0,0.18);z-index:99999;overflow:hidden;max-height:92vh;display:flex;flex-direction:column;">
+      <div id="daily-cap-calculator" style="width:460px;background:#fff;border-radius:12px;box-shadow:0 8px 32px rgba(0,0,0,0.18);z-index:99999;overflow:hidden;max-height:92vh;display:flex;flex-direction:column;">
 
         <!-- Header -->
         <div style="background:#1a5c38;padding:14px 18px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0;">
