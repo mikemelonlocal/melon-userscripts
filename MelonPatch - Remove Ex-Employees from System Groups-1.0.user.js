@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MelonPatch - Remove Ex-Employees from System Groups
 // @namespace    http://tampermonkey.net/
-// @version      2.3.0
+// @version      2.3.1
 // @description  Highlights ex-employees on System Group & Teams Detail pages, plus inline panels to bulk-remove ex-employees and bulk-add active Melons.
 // @match        https://thepatch.melonlocal.com/SystemGroups/Edit*
 // @match        https://thepatch.melonlocal.com/Teams/Details*
@@ -14,7 +14,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "patch-ex-employees-v2.3.0";
+  const VERSION = "patch-ex-employees-v2.3.1";
   const DEBUG = false;
   const debug = { DEBUGMODE: DEBUG };
 
@@ -718,6 +718,34 @@
     };
   }
   // ── Button Injector ──────────────────────────────────────────
+  /**
+   * Find the element to mount the trigger buttons next to. Must work for
+   * BOTH populated and empty groups — empty Teams have no removeMember_*
+   * buttons, so we fall back to the "Add a Team Member" autocomplete card.
+   */
+  function findInjectionAnchor() {
+    if (PageDetector.isSystemGroupEdit) {
+      return document.getElementById("systemGroupMembersChipList");
+    }
+    if (PageDetector.isTeamsDetails) {
+      // 1. Existing member row's panel (works when team has ≥1 member)
+      const firstBtn = document.querySelector('button[id^="removeMember_"]');
+      const fromBtn = firstBtn?.closest(".dashboard-panel");
+      if (fromBtn) return fromBtn;
+      // 2. Empty team: anchor on the "Add a Team Member" autocomplete input
+      const melonsInput = document.getElementById("melons");
+      const fromInput = melonsInput?.closest(".dashboard-panel");
+      if (fromInput) return fromInput;
+      // 3. Last resort: a heading/label that contains "Add a Team Member"
+      const labelMatch = [...document.querySelectorAll("h1,h2,h3,h4,h5,h6,label,div")]
+        .find((el) => /add\s+a?\s*team\s+member/i.test((el.textContent || "").trim()) && (el.textContent || "").length < 80);
+      const fromLabel = labelMatch?.closest(".dashboard-panel");
+      if (fromLabel) return fromLabel;
+      return firstBtn?.parentElement || melonsInput?.parentElement || labelMatch?.parentElement || null;
+    }
+    return null;
+  }
+
   const ButtonInjector = {
     _dashboard: null,
     _addDashboard: null,
@@ -729,16 +757,7 @@
       const haveAddBtn = !!document.getElementById(PANEL_IDS.addTriggerBtnId);
       if (haveExBtn && haveAddBtn) return;
 
-      // Find the anchor element to inject next to
-      let anchor = null;
-      if (PageDetector.isSystemGroupEdit) {
-        anchor = document.getElementById("systemGroupMembersChipList");
-      } else if (PageDetector.isTeamsDetails) {
-        // Use the first removeMember button's parent's parent (the .dashboard-panel)
-        const firstBtn = document.querySelector('button[id^="removeMember_"]');
-        anchor = firstBtn?.closest(".dashboard-panel") || firstBtn?.parentElement || null;
-      }
-
+      const anchor = findInjectionAnchor();
       if (!anchor) return;
 
       const exDashboard  = haveExBtn  ? this._dashboard    : buildExEmployeePanel();
@@ -809,10 +828,7 @@
       this._waiting = true;
       try {
         for (let i = 0; i < TIMING.MAX_WAIT_ITERATIONS; i++) {
-          const found = PageDetector.isSystemGroupEdit
-            ? document.getElementById("systemGroupMembersChipList")
-            : document.querySelector('button[id^="removeMember_"]');
-          if (found) { ButtonInjector.inject(); return; }
+          if (findInjectionAnchor()) { ButtonInjector.inject(); return; }
           await sleep(TIMING.WAIT_ITERATION_DELAY_MS);
         }
       } finally {
