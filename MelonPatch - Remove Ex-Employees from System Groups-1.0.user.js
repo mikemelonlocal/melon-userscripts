@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MelonPatch - Remove Ex-Employees from System Groups
 // @namespace    http://tampermonkey.net/
-// @version      2.0.0
+// @version      2.1.0
 // @description  Highlights ex-employees on System Group pages and provides an inline panel to bulk-remove them. Themed and structured to match Patch Targeting Helper.
 // @match        https://thepatch.melonlocal.com/SystemGroups/Edit*
 // @run-at       document-end
@@ -18,7 +18,7 @@
   // ============================================================
 
   // Keep in sync with @version in the userscript header above.
-  const VERSION = "patch-ex-employees-v2.0.0";
+  const VERSION = "patch-ex-employees-v2.1.0";
   const DEBUG = false;
 
   const _debug = { DEBUG_MODE: DEBUG };
@@ -30,6 +30,9 @@
     FOCUS_DELAY_MS: 0,
     RETRY_BASE_BACKOFF_MS: 200,
     RETRY_MAX_ATTEMPTS: 2, // total attempts after the first call = 2 retries
+    // Safety-net polling for re-injection after the page rebuilds the chip
+    // list (e.g., after a manual add/remove). Idempotent, so cheap to run.
+    REINJECT_INTERVAL_MS: 1500,
   };
 
   const COLORS = {
@@ -300,7 +303,12 @@
      * and return the list of ex-employees.
      */
     async scan() {
-      const chips = Array.from(document.querySelectorAll("#systemGroupMembersChipList .k-chip"));
+      // Try Kendo's class first; fall back to anything carrying data-chip-id
+      // inside the container, in case the page swaps to a non-Kendo render.
+      const container = document.getElementById("systemGroupMembersChipList");
+      let chips = container
+        ? Array.from(container.querySelectorAll(".k-chip[data-chip-id], [data-chip-id]"))
+        : [];
       if (!chips.length) {
         return { chips: [], exEmployees: [], reason: "no-chips" };
       }
@@ -475,7 +483,9 @@
 
     const renderStatus = () => {
       status.classList.remove("is-error", "is-warn", "is-info");
-      const onPage = document.querySelectorAll("#systemGroupMembersChipList .k-chip").length;
+      const onPage = document.querySelectorAll(
+        "#systemGroupMembersChipList .k-chip[data-chip-id], #systemGroupMembersChipList [data-chip-id]"
+      ).length;
       const count = lastScan.exEmployees.length;
       const onPageBadge = `<span class="badge">${onPage} on page</span>`;
       if (lastScan.reason === "fetch-failed") {
@@ -641,6 +651,7 @@
   const AppController = {
     mutationObserver: null,
     beforeUnloadHandler: null,
+    reinjectIntervalId: null,
     _waiting: false,
 
     async waitForChipList() {
@@ -649,7 +660,7 @@
       try {
         for (let i = 0; i < TIMING.MAX_WAIT_ITERATIONS; i++) {
           const list = document.getElementById("systemGroupMembersChipList");
-          if (list && list.querySelector(".k-chip")) {
+          if (list) {
             ButtonInjector.inject();
             return;
           }
@@ -684,6 +695,16 @@
         subtree: true,
       });
 
+      // Safety-net poll. The page replaces the chip-list subtree after manual
+      // adds/removes, which can outpace the debounced MutationObserver. inject()
+      // is idempotent (early-returns when the trigger button is already there),
+      // so polling is cheap and self-healing.
+      this.reinjectIntervalId = setInterval(() => {
+        if (PageDetector.isSystemGroupEdit) {
+          ButtonInjector.injectAllInlineUI();
+        }
+      }, TIMING.REINJECT_INTERVAL_MS);
+
       Object.assign(_debug, {
         ApiClient,
         ExEmployeeOperations,
@@ -709,6 +730,10 @@
       if (this.mutationObserver) {
         this.mutationObserver.disconnect();
         this.mutationObserver = null;
+      }
+      if (this.reinjectIntervalId) {
+        clearInterval(this.reinjectIntervalId);
+        this.reinjectIntervalId = null;
       }
       if (this.beforeUnloadHandler) {
         window.removeEventListener("beforeunload", this.beforeUnloadHandler);
