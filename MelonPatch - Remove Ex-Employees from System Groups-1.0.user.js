@@ -1,9 +1,10 @@
 // ==UserScript==
 // @name         MelonPatch - Remove Ex-Employees from System Groups
 // @namespace    http://tampermonkey.net/
-// @version      2.2.0
-// @description  Highlights ex-employees on System Group pages, plus inline panels to bulk-remove ex-employees and bulk-add active Melons. Themed and structured to match Patch Targeting Helper.
+// @version      2.3.0
+// @description  Highlights ex-employees on System Group & Teams Detail pages, plus inline panels to bulk-remove ex-employees and bulk-add active Melons. Themed and structured to match Patch Targeting Helper.
 // @match        https://thepatch.melonlocal.com/SystemGroups/Edit*
+// @match        https://thepatch.melonlocal.com/Teams/Details*
 // @run-at       document-end
 // @grant        none
 // @updateURL    https://raw.githubusercontent.com/mikemelonlocal/melon-userscripts/main/MelonPatch%20-%20Remove%20Ex-Employees%20from%20System%20Groups-1.0.user.js
@@ -18,10 +19,10 @@
   // ============================================================
 
   // Keep in sync with @version in the userscript header above.
-  const VERSION = "patch-ex-employees-v2.2.0";
-  const DEBUG = false;
+  const VERSION = "patch-ex-employees-v2.3.0";
 
-  const _debug = { DEBUG_MODE: DEBUG };
+  const DEBUG = false;
+  const debug = { DEBUGMODE: DEBUG };
 
   const TIMING = {
     DEFAULT_DELAY_MS: 120,
@@ -29,9 +30,7 @@
     WAIT_ITERATION_DELAY_MS: 150,
     FOCUS_DELAY_MS: 0,
     RETRY_BASE_BACKOFF_MS: 200,
-    RETRY_MAX_ATTEMPTS: 2, // total attempts after the first call = 2 retries
-    // Safety-net polling for re-injection after the page rebuilds the chip
-    // list (e.g., after a manual add/remove). Idempotent, so cheap to run.
+    RETRY_MAX_ATTEMPTS: 2,
     REINJECT_INTERVAL_MS: 1500,
   };
 
@@ -61,8 +60,13 @@
   };
 
   const ENDPOINTS = {
-    REMOVE_MEMBER: "/SystemGroups/Edit?handler=RemoveTargetSystemGroupMember",
-    ADD_MEMBER: "/SystemGroups/Edit",
+    // SystemGroups/Edit endpoints
+    SG_REMOVE_MEMBER: "/SystemGroups/Edit?handler=RemoveTargetSystemGroupMember",
+    SG_ADD_MEMBER: "/SystemGroups/Edit",
+    // Teams/Details endpoints
+    TEAMS_ADD_MEMBER: "/Teams/AddTeamMember",
+    TEAMS_REMOVE_MEMBER: "/Teams/RemoveTeamMember",
+    // Shared
     GET_MELONS: "/Lists/GetMelonVms",
   };
 
@@ -109,7 +113,7 @@
   }
 
   function normalizeText(s) {
-    return String(s || "").replace(/ /g, " ").replace(/\s+/g, " ").trim();
+    return String(s || "").replace(/\u00a0/g, " ").replace(/\s+/g, " ").trim();
   }
 
   function insertAfter(newNode, referenceNode) {
@@ -119,7 +123,7 @@
   }
 
   function log(message, ...args) {
-    if (DEBUG || _debug.DEBUG_MODE) {
+    if (DEBUG || debug.DEBUGMODE) {
       console.log(`[PatchExEmployees] ${message}`, ...args);
     }
   }
@@ -139,8 +143,18 @@
     get isPatch() {
       return this.hostLower === "thepatch.melonlocal.com";
     },
+
     get isSystemGroupEdit() {
       return this.isPatch && this.hrefLower.includes("/systemgroups/edit");
+    },
+
+    // NEW: Teams/Details page (e.g. /Teams/Details?id=1000001)
+    get isTeamsDetails() {
+      return this.isPatch && this.hrefLower.includes("/teams/details");
+    },
+
+    get isSupported() {
+      return this.isSystemGroupEdit || this.isTeamsDetails;
     },
   };
 
@@ -212,8 +226,8 @@
         transition: background-color 120ms ease;
       }
       .patch-inline-btn[disabled] { cursor: progress; opacity: 0.85; }
-      .patch-inline-btn--primary   { background: ${COLORS.cactus};         color: #fff; }
-      .patch-inline-btn--secondary { background: ${COLORS.sand};           color: ${COLORS.coconut}; }
+      .patch-inline-btn--primary   { background: ${COLORS.cactus};          color: #fff; }
+      .patch-inline-btn--secondary { background: ${COLORS.sand};            color: ${COLORS.coconut}; }
       .patch-inline-btn--danger    { background: ${COLORS.watermelonSugar}; color: #fff; }
       .patch-inline-btn--busy      { background: ${COLORS.mustardSeed} !important; color: #fff !important; }
       .patch-ex-employee-list {
@@ -238,6 +252,13 @@
       .${PANEL_IDS.chipMarkClass} {
         background-color: ${COLORS.whitneyPink} !important;
         border-color: ${COLORS.watermelonSugar} !important;
+        color: ${COLORS.cranberry} !important;
+      }
+      /* Teams/Details: highlight the whole <p> row for ex-employees */
+      .patch-ex-employee-row {
+        background: ${COLORS.whitneyPink} !important;
+        border-radius: 4px;
+        padding: 2px 4px;
         color: ${COLORS.cranberry} !important;
       }
       .patch-add-members-search {
@@ -302,14 +323,8 @@
   }
 
   // ============================================================
-  // API CLIENT — direct calls to the page's backend endpoints
+  // API CLIENT
   // ============================================================
-  // Endpoint contract:
-  //   GET /Lists/GetMelonVms                 -> [{ MelonId: number, ... }]
-  //   POST /SystemGroups/Edit?handler=RemoveTargetSystemGroupMember
-  //     Content-Type: application/json; charset=UTF-8
-  //     RequestVerificationToken: <from hidden input>
-  //     Body: {"SystemGroupId": <num>, "MelonId": <num>}
 
   const ApiClient = {
     getAntiforgeryToken() {
@@ -317,10 +332,17 @@
       return input?.value || "";
     },
 
+    // SystemGroups/Edit: systemGroupId from hidden input or URL param
     getSystemGroupId() {
       const hidden = document.querySelector('input[name="systemGroupId"]');
       if (hidden?.value) return String(hidden.value);
       const fromUrl = new URLSearchParams(window.location.search).get("systemGroupId");
+      return fromUrl ? String(fromUrl) : null;
+    },
+
+    // Teams/Details: teamId from URL param "id"
+    getTeamId() {
+      const fromUrl = new URLSearchParams(window.location.search).get("id");
       return fromUrl ? String(fromUrl) : null;
     },
 
@@ -337,23 +359,56 @@
       return new Set(melons.map((m) => m.MelonId));
     },
 
-    /**
-     * POST add-member with retry + exponential backoff. Mirrors the page's
-     * own AddNewSystemGroupMember function: bare /SystemGroups/Edit URL,
-     * JSON body {SystemGroupId, MelonId}, anti-forgery header.
-     */
+    // ── SystemGroups add ──────────────────────────────────────
     async addMember({ systemGroupId, melonId, token }, opts = {}) {
+      return this._post(
+        ENDPOINTS.SG_ADD_MEMBER,
+        { SystemGroupId: Number(systemGroupId), MelonId: Number(melonId) },
+        token,
+        opts
+      );
+    },
+
+    // ── SystemGroups remove ───────────────────────────────────
+    async removeMember({ systemGroupId, melonId, token }, opts = {}) {
+      return this._post(
+        ENDPOINTS.SG_REMOVE_MEMBER,
+        { SystemGroupId: Number(systemGroupId), MelonId: Number(melonId) },
+        token,
+        opts
+      );
+    },
+
+    // ── Teams/Details add ─────────────────────────────────────
+    async addTeamMember({ teamId, melonId, token }, opts = {}) {
+      return this._post(
+        ENDPOINTS.TEAMS_ADD_MEMBER,
+        { TeamId: Number(teamId), MemberId: Number(melonId) },
+        token,
+        opts
+      );
+    },
+
+    // ── Teams/Details remove ──────────────────────────────────
+    async removeTeamMember({ teamId, melonId, token }, opts = {}) {
+      return this._post(
+        ENDPOINTS.TEAMS_REMOVE_MEMBER,
+        { TeamId: Number(teamId), MemberId: Number(melonId) },
+        token,
+        opts
+      );
+    },
+
+    // ── Shared POST with retry ────────────────────────────────
+    async _post(url, bodyObj, token, opts = {}) {
       const maxRetries = opts.maxRetries ?? TIMING.RETRY_MAX_ATTEMPTS;
       const baseBackoff = opts.baseBackoffMs ?? TIMING.RETRY_BASE_BACKOFF_MS;
-      const body = JSON.stringify({
-        SystemGroupId: Number(systemGroupId),
-        MelonId: Number(melonId),
-      });
-
+      const body = JSON.stringify(bodyObj);
       let lastError;
+
       for (let attempt = 0; attempt <= maxRetries; attempt++) {
         try {
-          const response = await fetch(ENDPOINTS.ADD_MEMBER, {
+          const response = await fetch(url, {
             method: "POST",
             credentials: "same-origin",
             headers: {
@@ -363,6 +418,7 @@
             },
             body,
           });
+
           if (!response.ok) {
             if (response.status >= 500 || response.status === 429) {
               throw new Error(`HTTP ${response.status} ${response.statusText}`);
@@ -377,58 +433,12 @@
           lastError = error;
           if (error?.terminal || attempt === maxRetries) break;
           const backoff = baseBackoff * Math.pow(2, attempt);
-          log(`addMember retry ${attempt + 1}/${maxRetries} for MelonId ${melonId} after ${backoff}ms`, error?.message);
+          log(`_post retry ${attempt + 1}/${maxRetries} for ${url} after ${backoff}ms`, error?.message);
           await sleep(backoff);
         }
       }
-      throw lastError ?? new Error("Unknown error in addMember");
-    },
 
-    /**
-     * POST RemoveTargetSystemGroupMember with retry + exponential backoff.
-     * Throws if all attempts fail.
-     */
-    async removeMember({ systemGroupId, melonId, token }, opts = {}) {
-      const maxRetries = opts.maxRetries ?? TIMING.RETRY_MAX_ATTEMPTS;
-      const baseBackoff = opts.baseBackoffMs ?? TIMING.RETRY_BASE_BACKOFF_MS;
-      const body = JSON.stringify({
-        SystemGroupId: Number(systemGroupId),
-        MelonId: Number(melonId),
-      });
-
-      let lastError;
-      for (let attempt = 0; attempt <= maxRetries; attempt++) {
-        try {
-          const response = await fetch(ENDPOINTS.REMOVE_MEMBER, {
-            method: "POST",
-            credentials: "same-origin",
-            headers: {
-              "Content-Type": "application/json; charset=UTF-8",
-              "X-Requested-With": "XMLHttpRequest",
-              RequestVerificationToken: token,
-            },
-            body,
-          });
-          if (!response.ok) {
-            // Treat 5xx and 429 as retryable; 4xx (other) as terminal.
-            if (response.status >= 500 || response.status === 429) {
-              throw new Error(`HTTP ${response.status} ${response.statusText}`);
-            }
-            throw Object.assign(
-              new Error(`HTTP ${response.status} ${response.statusText}`),
-              { terminal: true }
-            );
-          }
-          return; // success
-        } catch (error) {
-          lastError = error;
-          if (error?.terminal || attempt === maxRetries) break;
-          const backoff = baseBackoff * Math.pow(2, attempt);
-          log(`removeMember retry ${attempt + 1}/${maxRetries} for MelonId ${melonId} after ${backoff}ms`, error?.message);
-          await sleep(backoff);
-        }
-      }
-      throw lastError ?? new Error("Unknown error in removeMember");
+      throw lastError ?? new Error("Unknown error in _post");
     },
   };
 
@@ -438,86 +448,175 @@
 
   const ExEmployeeOperations = {
     /**
-     * Scan the Kendo chip list, mark ex-employee chips with our CSS class,
-     * and return the list of ex-employees.
+     * Scan for ex-employees. Works on both page types.
+     *
+     * SystemGroups/Edit  → Kendo chips with [data-chip-id]
+     * Teams/Details      → <p> rows containing button[id^="removeMember_"]
      */
     async scan() {
-      // Try Kendo's class first; fall back to anything carrying data-chip-id
-      // inside the container, in case the page swaps to a non-Kendo render.
-      const container = document.getElementById("systemGroupMembersChipList");
-      let chips = container
-        ? Array.from(container.querySelectorAll(".k-chip[data-chip-id], [data-chip-id]"))
-        : [];
-      if (!chips.length) {
-        return { chips: [], exEmployees: [], reason: "no-chips" };
-      }
       let activeMelonIds;
       try {
         activeMelonIds = await ApiClient.getActiveMelonIds();
       } catch (error) {
         logError("Failed to load active melons:", error);
-        return { chips, exEmployees: [], reason: "fetch-failed", error };
+        return { members: [], exEmployees: [], reason: "fetch-failed", error };
       }
-      const exEmployees = [];
-      for (const chip of chips) {
-        const melonId = Number(chip.getAttribute("data-chip-id"));
-        if (!Number.isFinite(melonId)) continue;
-        if (activeMelonIds.has(melonId)) {
-          chip.classList.remove(PANEL_IDS.chipMarkClass);
-          if (chip.title === "Ex-employee (not in active Melons list)") {
-            chip.removeAttribute("title");
-          }
-          continue;
+
+      // ── SystemGroups branch ──────────────────────────────────
+      if (PageDetector.isSystemGroupEdit) {
+        const container = document.getElementById("systemGroupMembersChipList");
+        const chips = container
+          ? Array.from(container.querySelectorAll(".k-chip[data-chip-id], [data-chip-id]"))
+          : [];
+
+        if (!chips.length) {
+          return { members: chips, exEmployees: [], reason: "no-chips" };
         }
-        chip.classList.add(PANEL_IDS.chipMarkClass);
-        chip.title = "Ex-employee (not in active Melons list)";
-        const name = normalizeText(chip.textContent) || `MelonId ${melonId}`;
-        exEmployees.push({ chip, melonId, name });
+
+        const exEmployees = [];
+        for (const chip of chips) {
+          const melonId = Number(chip.getAttribute("data-chip-id"));
+          if (!Number.isFinite(melonId)) continue;
+
+          if (activeMelonIds.has(melonId)) {
+            chip.classList.remove(PANEL_IDS.chipMarkClass);
+            if (chip.title === "Ex-employee (not in active Melons list)") {
+              chip.removeAttribute("title");
+            }
+            continue;
+          }
+
+          chip.classList.add(PANEL_IDS.chipMarkClass);
+          chip.title = "Ex-employee (not in active Melons list)";
+          const name = normalizeText(chip.textContent) || `MelonId ${melonId}`;
+          exEmployees.push({ element: chip, melonId, name });
+        }
+
+        log("Scan complete (SystemGroups)", { total: chips.length, exEmployees: exEmployees.length });
+        return { members: chips, exEmployees, reason: "ok" };
       }
-      log("Scan complete", { total: chips.length, exEmployees: exEmployees.length });
-      return { chips, exEmployees, reason: "ok" };
+
+      // ── Teams/Details branch ─────────────────────────────────
+      if (PageDetector.isTeamsDetails) {
+        const removeBtns = Array.from(
+          document.querySelectorAll('button[id^="removeMember_"]')
+        );
+
+        if (!removeBtns.length) {
+          return { members: [], exEmployees: [], reason: "no-chips" };
+        }
+
+        const exEmployees = [];
+        for (const btn of removeBtns) {
+          const melonId = parseInt(btn.id.replace("removeMember_", ""), 10);
+          if (!Number.isFinite(melonId)) continue;
+
+          const rowEl = btn.parentElement; // the <p> element
+
+          if (activeMelonIds.has(melonId)) {
+            rowEl?.classList.remove("patch-ex-employee-row");
+            if (rowEl?.title === "Ex-employee (not in active Melons list)") {
+              rowEl.removeAttribute("title");
+            }
+            continue;
+          }
+
+          rowEl?.classList.add("patch-ex-employee-row");
+          if (rowEl) rowEl.title = "Ex-employee (not in active Melons list)";
+
+          // Extract name: the <p> text minus the button text
+          const rawName = normalizeText(
+            (rowEl?.childNodes[0]?.textContent || "")
+          );
+          const name = rawName || `MelonId ${melonId}`;
+          exEmployees.push({ element: btn, rowEl, melonId, name });
+        }
+
+        log("Scan complete (Teams)", { total: removeBtns.length, exEmployees: exEmployees.length });
+        return { members: removeBtns, exEmployees, reason: "ok" };
+      }
+
+      return { members: [], exEmployees: [], reason: "no-chips" };
     },
 
     /**
-     * Remove ex-employees one at a time via the API. opts.onProgress({completed,total,phase})
-     * fires after each item.
+     * Remove ex-employees one at a time via the API.
+     * Routes to the correct endpoint based on current page type.
      */
     async run(exEmployees, delayMs = TIMING.DEFAULT_DELAY_MS, opts = {}) {
       if (!exEmployees.length) {
         return { ok: false, reason: "empty", message: "Nothing to remove." };
       }
+
       const token = ApiClient.getAntiforgeryToken();
-      const systemGroupId = ApiClient.getSystemGroupId();
-      if (!token || !systemGroupId) {
-        logError("API remove unavailable", { hasToken: !!token, hasSystemGroupId: !!systemGroupId });
-        return {
-          ok: false,
-          reason: "no-api",
-          message: "Cannot remove via API: missing anti-forgery token or systemGroupId.",
-        };
+
+      // ── Determine page context ────────────────────────────────
+      let groupId, removeOneFn;
+
+      if (PageDetector.isSystemGroupEdit) {
+        groupId = ApiClient.getSystemGroupId();
+        if (!token || !groupId) {
+          logError("API remove unavailable (SG)", { hasToken: !!token, groupId });
+          return {
+            ok: false,
+            reason: "no-api",
+            message: "Cannot remove via API: missing anti-forgery token or systemGroupId.",
+          };
+        }
+        removeOneFn = (entry) =>
+          ApiClient.removeMember({ systemGroupId: groupId, melonId: entry.melonId, token });
+
+      } else if (PageDetector.isTeamsDetails) {
+        groupId = ApiClient.getTeamId();
+        if (!token || !groupId) {
+          logError("API remove unavailable (Teams)", { hasToken: !!token, groupId });
+          return {
+            ok: false,
+            reason: "no-api",
+            message: "Cannot remove via API: missing anti-forgery token or teamId.",
+          };
+        }
+        removeOneFn = (entry) =>
+          ApiClient.removeTeamMember({ teamId: groupId, melonId: entry.melonId, token });
+
+      } else {
+        return { ok: false, reason: "no-api", message: "Unsupported page." };
       }
+
       let removed = 0;
       const failed = [];
+
       for (let i = 0; i < exEmployees.length; i++) {
         const entry = exEmployees[i];
         try {
-          await ApiClient.removeMember({ systemGroupId, melonId: entry.melonId, token });
-          try { entry.chip.remove(); } catch (_) {}
+          await removeOneFn(entry);
+          // Remove the DOM element (chip or <p> row)
+          try {
+            if (entry.rowEl) {
+              entry.rowEl.remove();          // Teams: remove the whole <p>
+            } else {
+              entry.element.remove();        // SystemGroups: remove the chip
+            }
+          } catch (_) {}
           removed++;
           await sleep(delayMs);
         } catch (error) {
           logError(`API remove failed for MelonId ${entry.melonId}:`, error?.message || error);
           failed.push(entry);
         }
-        if (opts.onProgress) opts.onProgress({ completed: i + 1, total: exEmployees.length, phase: "Removing" });
+
+        if (opts.onProgress)
+          opts.onProgress({ completed: i + 1, total: exEmployees.length, phase: "Removing" });
       }
+
       return {
         ok: true,
         completed: removed,
         total: exEmployees.length,
         failed,
         reload: removed > 0,
-        message: `Removed ${removed} of ${exEmployees.length} ex-employee(s)` +
+        message:
+          `Removed ${removed} of ${exEmployees.length} ex-employee(s)` +
           (failed.length ? `  •  Failed: ${failed.length}` : ""),
       };
     },
@@ -529,24 +628,32 @@
 
   const AddMemberOperations = {
     /**
-     * Read MelonIds for everyone currently in the chip list, so the picker
-     * can hide them.
+     * Read MelonIds for everyone currently listed, so the picker can hide them.
+     * Works on both page types.
      */
     getCurrentMemberIds() {
       const ids = new Set();
-      const container = document.getElementById("systemGroupMembersChipList");
-      if (!container) return ids;
-      const chips = container.querySelectorAll(".k-chip[data-chip-id], [data-chip-id]");
-      for (const chip of chips) {
-        const id = Number(chip.getAttribute("data-chip-id"));
-        if (Number.isFinite(id)) ids.add(id);
+
+      if (PageDetector.isSystemGroupEdit) {
+        const container = document.getElementById("systemGroupMembersChipList");
+        if (!container) return ids;
+        const chips = container.querySelectorAll(".k-chip[data-chip-id], [data-chip-id]");
+        for (const chip of chips) {
+          const id = Number(chip.getAttribute("data-chip-id"));
+          if (Number.isFinite(id)) ids.add(id);
+        }
+
+      } else if (PageDetector.isTeamsDetails) {
+        const removeBtns = document.querySelectorAll('button[id^="removeMember_"]');
+        for (const btn of removeBtns) {
+          const id = parseInt(btn.id.replace("removeMember_", ""), 10);
+          if (Number.isFinite(id)) ids.add(id);
+        }
       }
+
       return ids;
     },
 
-    /**
-     * Pull all active melons and remove anyone already a member.
-     */
     async getCandidates() {
       const all = await ApiClient.getActiveMelons();
       const current = this.getCurrentMemberIds();
@@ -559,44 +666,74 @@
     },
 
     /**
-     * Add each selected melon. opts.onProgress({completed,total,phase}) fires
-     * after each item.
+     * Add each selected melon.
+     * Routes to the correct endpoint based on current page type.
      */
     async run(melons, delayMs = TIMING.DEFAULT_DELAY_MS, opts = {}) {
       if (!melons.length) {
         return { ok: false, reason: "empty", message: "Nothing to add." };
       }
+
       const token = ApiClient.getAntiforgeryToken();
-      const systemGroupId = ApiClient.getSystemGroupId();
-      if (!token || !systemGroupId) {
-        logError("API add unavailable", { hasToken: !!token, hasSystemGroupId: !!systemGroupId });
-        return {
-          ok: false,
-          reason: "no-api",
-          message: "Cannot add via API: missing anti-forgery token or systemGroupId.",
-        };
+
+      let groupId, addOneFn;
+
+      if (PageDetector.isSystemGroupEdit) {
+        groupId = ApiClient.getSystemGroupId();
+        if (!token || !groupId) {
+          logError("API add unavailable (SG)", { hasToken: !!token, groupId });
+          return {
+            ok: false,
+            reason: "no-api",
+            message: "Cannot add via API: missing anti-forgery token or systemGroupId.",
+          };
+        }
+        addOneFn = (m) =>
+          ApiClient.addMember({ systemGroupId: groupId, melonId: m.MelonId, token });
+
+      } else if (PageDetector.isTeamsDetails) {
+        groupId = ApiClient.getTeamId();
+        if (!token || !groupId) {
+          logError("API add unavailable (Teams)", { hasToken: !!token, groupId });
+          return {
+            ok: false,
+            reason: "no-api",
+            message: "Cannot add via API: missing anti-forgery token or teamId.",
+          };
+        }
+        addOneFn = (m) =>
+          ApiClient.addTeamMember({ teamId: groupId, melonId: m.MelonId, token });
+
+      } else {
+        return { ok: false, reason: "no-api", message: "Unsupported page." };
       }
+
       let added = 0;
       const failed = [];
+
       for (let i = 0; i < melons.length; i++) {
         const m = melons[i];
         try {
-          await ApiClient.addMember({ systemGroupId, melonId: m.MelonId, token });
+          await addOneFn(m);
           added++;
           await sleep(delayMs);
         } catch (error) {
           logError(`API add failed for MelonId ${m.MelonId}:`, error?.message || error);
           failed.push(m);
         }
-        if (opts.onProgress) opts.onProgress({ completed: i + 1, total: melons.length, phase: "Adding" });
+
+        if (opts.onProgress)
+          opts.onProgress({ completed: i + 1, total: melons.length, phase: "Adding" });
       }
+
       return {
         ok: true,
         completed: added,
         total: melons.length,
         failed,
         reload: added > 0,
-        message: `Added ${added} of ${melons.length} member(s)` +
+        message:
+          `Added ${added} of ${melons.length} member(s)` +
           (failed.length ? `  •  Failed: ${failed.length}` : ""),
       };
     },
@@ -631,7 +768,7 @@
   };
 
   // ============================================================
-  // PANEL BUILDER
+  // PANEL BUILDER — Ex-Employees
   // ============================================================
 
   function buildExEmployeePanel() {
@@ -641,34 +778,35 @@
     panel.hidden = true;
     panel.dataset.bulkPanel = "ex-employees";
 
-    // Header
     const header = document.createElement("div");
     header.className = `${PANEL_IDS.inlinePanelClass}-header`;
+
     const titleEl = document.createElement("div");
     titleEl.className = `${PANEL_IDS.inlinePanelClass}-title`;
     titleEl.textContent = "Remove Ex-Employees";
+
     const closeBtn = document.createElement("button");
     closeBtn.type = "button";
     closeBtn.className = `${PANEL_IDS.inlinePanelClass}-close`;
     closeBtn.setAttribute("aria-label", "Close");
     closeBtn.textContent = "×";
+
     header.appendChild(titleEl);
     header.appendChild(closeBtn);
 
-    // List of detected ex-employees
     const list = document.createElement("div");
     list.className = "patch-ex-employee-list";
 
-    // Status line
     const status = document.createElement("div");
     status.className = `${PANEL_IDS.inlinePanelStatusClass} is-info`;
 
-    // Buttons
     const btnRow = document.createElement("div");
     btnRow.className = `${PANEL_IDS.inlinePanelClass}-button-row`;
-    const cancelBtn = InlineDashboard.makeButton("Cancel", "secondary");
-    const rescanBtn = InlineDashboard.makeButton("Rescan", "secondary");
-    const removeBtn = InlineDashboard.makeButton("Remove Ex-Employees", "danger");
+
+    const cancelBtn  = InlineDashboard.makeButton("Cancel", "secondary");
+    const rescanBtn  = InlineDashboard.makeButton("Rescan", "secondary");
+    const removeBtn  = InlineDashboard.makeButton("Remove Ex-Employees", "danger");
+
     btnRow.appendChild(cancelBtn);
     btnRow.appendChild(rescanBtn);
     btnRow.appendChild(removeBtn);
@@ -680,14 +818,27 @@
 
     let lastScan = { exEmployees: [], reason: "pending" };
 
+    const countMembers = () => {
+      if (PageDetector.isSystemGroupEdit) {
+        return document.querySelectorAll(
+          "#systemGroupMembersChipList .k-chip[data-chip-id], #systemGroupMembersChipList [data-chip-id]"
+        ).length;
+      }
+      if (PageDetector.isTeamsDetails) {
+        return document.querySelectorAll('button[id^="removeMember_"]').length;
+      }
+      return 0;
+    };
+
     const renderList = () => {
       list.innerHTML = "";
       if (!lastScan.exEmployees.length) {
         const empty = document.createElement("div");
         empty.className = "patch-ex-employee-list-empty";
-        empty.textContent = lastScan.reason === "pending"
-          ? "Click Rescan to detect ex-employees."
-          : "No ex-employees detected.";
+        empty.textContent =
+          lastScan.reason === "pending"
+            ? "Click Rescan to detect ex-employees."
+            : "No ex-employees detected.";
         list.appendChild(empty);
         return;
       }
@@ -701,11 +852,10 @@
 
     const renderStatus = () => {
       status.classList.remove("is-error", "is-warn", "is-info");
-      const onPage = document.querySelectorAll(
-        "#systemGroupMembersChipList .k-chip[data-chip-id], #systemGroupMembersChipList [data-chip-id]"
-      ).length;
-      const count = lastScan.exEmployees.length;
+      const onPage   = countMembers();
+      const count    = lastScan.exEmployees.length;
       const onPageBadge = `<span class="badge">${onPage} on page</span>`;
+
       if (lastScan.reason === "fetch-failed") {
         status.classList.add("is-error");
         status.innerHTML = `Could not fetch active melons. ${onPageBadge}`;
@@ -713,7 +863,7 @@
       }
       if (lastScan.reason === "no-chips") {
         status.classList.add("is-warn");
-        status.textContent = "No member chips visible yet.";
+        status.textContent = "No members visible yet.";
         return;
       }
       if (lastScan.reason === "pending") {
@@ -746,6 +896,7 @@
     };
 
     const close = () => { panel.hidden = true; };
+
     cancelBtn.addEventListener("click", close);
     closeBtn.addEventListener("click", close);
     rescanBtn.addEventListener("click", () => { rescan(); });
@@ -754,11 +905,12 @@
       if (removeBtn.disabled) return;
       const count = lastScan.exEmployees.length;
       if (!count) return;
-      if (!confirm(`Remove ${count} ex-employee(s) from this system group? This cannot be undone.`)) return;
+      if (!confirm(`Remove ${count} ex-employee(s) from this group? This cannot be undone.`)) return;
 
       cancelBtn.disabled = true;
       rescanBtn.disabled = true;
       InlineDashboard.setBusy(removeBtn, true, `(0/${count}) Removing...`);
+
       const onProgress = ({ completed, total }) => {
         removeBtn.textContent = `(${completed}/${total}) Removing...`;
       };
@@ -768,6 +920,7 @@
         TIMING.DEFAULT_DELAY_MS,
         { onProgress }
       );
+
       InlineDashboard.setBusy(removeBtn, false);
       cancelBtn.disabled = false;
       rescanBtn.disabled = false;
@@ -788,7 +941,6 @@
       }
     });
 
-    // Initial empty render
     renderList();
     renderStatus();
     updateRemoveBtnState();
@@ -814,7 +966,7 @@
   }
 
   // ============================================================
-  // ADD-MEMBERS PANEL BUILDER
+  // PANEL BUILDER — Add Members
   // ============================================================
 
   function buildAddMembersPanel() {
@@ -850,11 +1002,11 @@
 
     const btnRow = document.createElement("div");
     btnRow.className = `${PANEL_IDS.inlinePanelClass}-button-row`;
-    const cancelBtn = InlineDashboard.makeButton("Cancel", "secondary");
-    const refreshBtn = InlineDashboard.makeButton("Refresh", "secondary");
+    const cancelBtn        = InlineDashboard.makeButton("Cancel", "secondary");
+    const refreshBtn       = InlineDashboard.makeButton("Refresh", "secondary");
     const selectVisibleBtn = InlineDashboard.makeButton("Select visible", "secondary");
-    const clearBtn = InlineDashboard.makeButton("Clear", "secondary");
-    const addBtn = InlineDashboard.makeButton("Add Selected", "primary");
+    const clearBtn         = InlineDashboard.makeButton("Clear", "secondary");
+    const addBtn           = InlineDashboard.makeButton("Add Selected", "primary");
     btnRow.appendChild(cancelBtn);
     btnRow.appendChild(refreshBtn);
     btnRow.appendChild(clearBtn);
@@ -880,7 +1032,7 @@
         return;
       }
       status.classList.add("is-info");
-      const sel = selected.size;
+      const sel   = selected.size;
       const shown = filtered.length;
       const total = allCandidates.length;
       status.innerHTML =
@@ -965,8 +1117,6 @@
       renderStatus();
       try {
         allCandidates = await AddMemberOperations.getCandidates();
-        // Drop any selections that are no longer candidates (e.g. someone
-        // got added in another tab).
         const stillValid = new Set(allCandidates.map((m) => m.MelonId));
         for (const id of [...selected.keys()]) {
           if (!stillValid.has(id)) selected.delete(id);
@@ -1007,7 +1157,7 @@
       if (addBtn.disabled) return;
       const picks = [...selected.values()];
       if (!picks.length) return;
-      if (!confirm(`Add ${picks.length} member(s) to this system group?`)) return;
+      if (!confirm(`Add ${picks.length} member(s) to this group?`)) return;
 
       cancelBtn.disabled = true;
       refreshBtn.disabled = true;
@@ -1076,22 +1226,51 @@
     _dashboard: null,
     _addDashboard: null,
 
+    /**
+     * Pick an anchor element to insert the trigger buttons before.
+     * Returns { anchorParent, anchorEl } or null if not yet ready.
+     */
+    findAnchor() {
+      if (PageDetector.isSystemGroupEdit) {
+        const chipList = document.getElementById("systemGroupMembersChipList");
+        if (!chipList) return null;
+        return { anchorParent: chipList.parentElement, anchorEl: chipList };
+      }
+
+      if (PageDetector.isTeamsDetails) {
+        // Prefer the container that wraps all member <p> rows.
+        const firstRow = document.querySelector('button[id^="removeMember_"]')?.parentElement;
+        const container = firstRow?.parentElement;
+        if (container) {
+          return { anchorParent: container.parentElement || container, anchorEl: container };
+        }
+        // Fallback: a heading that looks like "Team Members" / "Members".
+        const heading = [...document.querySelectorAll("h1, h2, h3, h4, h5, h6, label")]
+          .find((el) => /\b(team\s*)?members?\b/i.test(el.textContent || "") && (el.textContent || "").length < 60);
+        if (heading) {
+          return { anchorParent: heading.parentElement, anchorEl: heading.nextSibling || heading };
+        }
+        return null;
+      }
+
+      return null;
+    },
+
     inject() {
-      if (!PageDetector.isSystemGroupEdit) return;
-      const haveExBtn = !!document.getElementById(PANEL_IDS.triggerBtnId);
+      if (!PageDetector.isSupported) return;
+      const haveExBtn  = !!document.getElementById(PANEL_IDS.triggerBtnId);
       const haveAddBtn = !!document.getElementById(PANEL_IDS.addTriggerBtnId);
       if (haveExBtn && haveAddBtn) return;
 
-      const chipList = document.getElementById("systemGroupMembersChipList");
-      if (!chipList) return;
+      const anchor = this.findAnchor();
+      if (!anchor) return;
+      const { anchorParent, anchorEl } = anchor;
+      if (!anchorParent || !anchorEl) return;
 
-      // Build (or reuse) dashboards.
-      const exDashboard = haveExBtn ? this._dashboard : buildExEmployeePanel();
+      const exDashboard  = haveExBtn  ? this._dashboard    : buildExEmployeePanel();
       const addDashboard = haveAddBtn ? this._addDashboard : buildAddMembersPanel();
-      this._dashboard = exDashboard;
+      this._dashboard    = exDashboard;
       this._addDashboard = addDashboard;
-
-      const anchorParent = chipList.parentElement;
 
       const buildTriggerBtn = (id, text, onClick) => {
         const btn = document.createElement("button");
@@ -1111,8 +1290,11 @@
           exDashboard.hide();
           addDashboard.toggle();
         });
-        if (anchorParent) anchorParent.insertBefore(addTrigger, chipList);
-        else chipList.before(addTrigger);
+        try {
+          anchorParent.insertBefore(addTrigger, anchorEl);
+        } catch (_) {
+          anchorEl.parentElement?.insertBefore(addTrigger, anchorEl);
+        }
         insertAfter(addDashboard.panel, addTrigger);
       }
 
@@ -1126,14 +1308,16 @@
         const addTrigger = document.getElementById(PANEL_IDS.addTriggerBtnId);
         if (addTrigger) {
           insertAfter(exTrigger, addTrigger);
-        } else if (anchorParent) {
-          anchorParent.insertBefore(exTrigger, chipList);
         } else {
-          chipList.before(exTrigger);
+          try {
+            anchorParent.insertBefore(exTrigger, anchorEl);
+          } catch (_) {
+            anchorEl.parentElement?.insertBefore(exTrigger, anchorEl);
+          }
         }
         insertAfter(exDashboard.panel, exTrigger);
 
-        // Auto-scan on injection so ex-employee chips get marked even before
+        // Auto-scan on injection so ex-employee rows get marked even before
         // the user opens the panel.
         exDashboard.rescan().catch((e) => logError("Initial rescan failed:", e));
       }
@@ -1160,13 +1344,12 @@
     reinjectIntervalId: null,
     _waiting: false,
 
-    async waitForChipList() {
+    async waitForAnchor() {
       if (this._waiting) return;
       this._waiting = true;
       try {
         for (let i = 0; i < TIMING.MAX_WAIT_ITERATIONS; i++) {
-          const list = document.getElementById("systemGroupMembersChipList");
-          if (list) {
+          if (ButtonInjector.findAnchor()) {
             ButtonInjector.inject();
             return;
           }
@@ -1178,7 +1361,7 @@
     },
 
     tick() {
-      this.waitForChipList().catch((e) => logError("waitForChipList:", e));
+      this.waitForAnchor().catch((e) => logError("waitForAnchor:", e));
     },
 
     handleMutations: debounce(function () {
@@ -1190,7 +1373,7 @@
     },
 
     init() {
-      if (!PageDetector.isSystemGroupEdit) return;
+      if (!PageDetector.isSupported) return;
       log("Initializing", VERSION);
       injectGlobalStyles();
       this.tick();
@@ -1201,17 +1384,17 @@
         subtree: true,
       });
 
-      // Safety-net poll. The page replaces the chip-list subtree after manual
-      // adds/removes, which can outpace the debounced MutationObserver. inject()
-      // is idempotent (early-returns when the trigger button is already there),
-      // so polling is cheap and self-healing.
+      // Safety-net poll. The page replaces the chip-list / member-row subtree
+      // after manual adds/removes, which can outpace the debounced
+      // MutationObserver. inject() is idempotent (early-returns when both
+      // trigger buttons already exist), so polling is cheap and self-healing.
       this.reinjectIntervalId = setInterval(() => {
-        if (PageDetector.isSystemGroupEdit) {
+        if (PageDetector.isSupported) {
           ButtonInjector.injectAllInlineUI();
         }
       }, TIMING.REINJECT_INTERVAL_MS);
 
-      Object.assign(_debug, {
+      Object.assign(debug, {
         ApiClient,
         ExEmployeeOperations,
         AddMemberOperations,
@@ -1219,10 +1402,10 @@
         PageDetector,
         InlineDashboard,
       });
-      window.PatchExEmployees = { version: VERSION, _debug };
+      window.PatchExEmployees = { version: VERSION, _debug: debug };
       window.PatchExEmployeesDebug = {
-        enableDebug: () => { _debug.DEBUG_MODE = true; },
-        disableDebug: () => { _debug.DEBUG_MODE = false; },
+        enableDebug: () => { debug.DEBUGMODE = true; },
+        disableDebug: () => { debug.DEBUGMODE = false; },
         injectButtons: () => {
           ButtonInjector.injectAllInlineUI();
           console.log("[PatchExEmployees] Manual UI injection triggered");
