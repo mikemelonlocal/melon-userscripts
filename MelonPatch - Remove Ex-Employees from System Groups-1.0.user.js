@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MelonPatch - Remove Ex-Employees from System Groups
 // @namespace    http://tampermonkey.net/
-// @version      2.4.0
+// @version      2.5.0
 // @description  Highlights ex-employees on System Group & Teams Detail pages, plus inline panels to bulk-remove ex-employees and bulk-add active Melons.
 // @match        https://thepatch.melonlocal.com/SystemGroups/Edit*
 // @match        https://thepatch.melonlocal.com/Teams/Details*
@@ -14,7 +14,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "patch-ex-employees-v2.4.0";
+  const VERSION = "patch-ex-employees-v2.5.0";
   const DEBUG = false;
   const debug = { DEBUGMODE: DEBUG };
 
@@ -186,6 +186,8 @@
       .patch-add-members-filters .patch-add-members-search{flex:1;min-width:180px;margin-bottom:0}
       .patch-add-members-role-select{padding:7px 8px;font-size:13px;border:1px solid ${COLORS.mojave};border-radius:4px;background:#fff;color:${COLORS.coconut};min-width:160px}
       .patch-add-members-role-select:focus{outline:none;border-color:${COLORS.cactus};box-shadow:0 0 0 2px rgba(71,183,79,.15)}
+      .patch-add-members-external-toggle{display:flex;align-items:center;gap:6px;font-size:12px;color:${COLORS.coconut};white-space:nowrap;cursor:pointer;user-select:none;padding:0 4px}
+      .patch-add-members-external-toggle input{accent-color:${COLORS.cactus};margin:0;cursor:pointer}
     `;
     document.head.appendChild(s);
   }
@@ -591,9 +593,18 @@
     roleSelect.className = "patch-add-members-role-select";
     roleSelect.setAttribute("aria-label", "Filter by role");
 
+    const externalToggle = document.createElement("label");
+    externalToggle.className = "patch-add-members-external-toggle";
+    const externalCheckbox = document.createElement("input");
+    externalCheckbox.type = "checkbox";
+    externalCheckbox.checked = false; // exclude externals by default
+    const externalLabelText = document.createElement("span");
+    externalLabelText.textContent = "Include external";
+    externalToggle.append(externalCheckbox, externalLabelText);
+
     const filtersRow = document.createElement("div");
     filtersRow.className = "patch-add-members-filters";
-    filtersRow.append(search, roleSelect);
+    filtersRow.append(search, roleSelect, externalToggle);
 
     const list = document.createElement("div");
     list.className = "patch-add-members-list";
@@ -609,7 +620,13 @@
     btnRow.append(cancelBtn, refreshBtn, clearBtn, selectVisibleBtn, addBtn);
     panel.append(header, filtersRow, list, status, btnRow);
 
-    let allCandidates = [], filtered = [], selected = new Map(), loadState = "pending";
+    // rawCandidates: full server response post member-exclusion (unfiltered).
+    // allCandidates: rawCandidates after the External toggle. This is what
+    //   feeds the role dropdown and the "addable" badge.
+    // filtered:      allCandidates after Role + text-search filters. Rendered.
+    let rawCandidates = [], allCandidates = [], filtered = [];
+    let selected = new Map();
+    let loadState = "pending";
 
     const renderStatus = () => {
       status.classList.remove("is-error", "is-warn", "is-info");
@@ -724,17 +741,31 @@
       renderList(); renderStatus();
     };
 
+    const cleanupSelected = () => {
+      const stillValid = new Set(allCandidates.map((m) => m.MelonId));
+      for (const id of [...selected.keys()]) {
+        if (!stillValid.has(id)) selected.delete(id);
+      }
+    };
+
+    const applyExternalFilter = () => {
+      allCandidates = externalCheckbox.checked
+        ? rawCandidates.slice()
+        : rawCandidates.filter((m) => m?.External !== true);
+    };
+
     const refresh = async () => {
       loadState = "pending";
       InlineDashboard.setBusy(refreshBtn, true, "Loading...");
       renderList(); renderStatus();
       try {
-        allCandidates = await AddMemberOperations.getCandidates();
-        const stillValid = new Set(allCandidates.map((m) => m.MelonId));
-        for (const id of [...selected.keys()]) { if (!stillValid.has(id)) selected.delete(id); }
+        rawCandidates = await AddMemberOperations.getCandidates();
+        applyExternalFilter();
+        cleanupSelected();
         loadState = "ok";
       } catch (e) {
         logError("Failed to load candidates:", e);
+        rawCandidates = [];
         allCandidates = [];
         loadState = "error";
       }
@@ -754,6 +785,13 @@
     });
     search.addEventListener("input", debounce(applyFilter, 100));
     roleSelect.addEventListener("change", applyFilter);
+    externalCheckbox.addEventListener("change", () => {
+      applyExternalFilter();
+      cleanupSelected();
+      populateRoleSelect();
+      applyFilter();
+      updateAddBtnState();
+    });
 
     addBtn.addEventListener("click", async () => {
       if (addBtn.disabled) return;
@@ -762,6 +800,7 @@
       [cancelBtn, refreshBtn, clearBtn, selectVisibleBtn].forEach((b) => (b.disabled = true));
       search.disabled = true;
       roleSelect.disabled = true;
+      externalCheckbox.disabled = true;
       InlineDashboard.setBusy(addBtn, true, `(0/${picks.length}) Adding...`);
       const result = await AddMemberOperations.run(picks, TIMING.DEFAULT_DELAY_MS, {
         onProgress: ({ completed, total }) => { addBtn.textContent = `(${completed}/${total}) Adding...`; },
@@ -770,6 +809,7 @@
       [cancelBtn, refreshBtn, clearBtn, selectVisibleBtn].forEach((b) => (b.disabled = false));
       search.disabled = false;
       roleSelect.disabled = false;
+      externalCheckbox.disabled = false;
       status.classList.remove("is-info", "is-warn", "is-error");
       if (result.ok) {
         status.classList.add("is-info");
