@@ -2,7 +2,7 @@
 // @name         MelonPatch - Remove Ex-Employees from System Groups
 // @namespace    http://tampermonkey.net/
 // @version      2.3.0
-// @description  Highlights ex-employees on System Group & Teams Detail pages, plus inline panels to bulk-remove ex-employees and bulk-add active Melons. Themed and structured to match Patch Targeting Helper.
+// @description  Highlights ex-employees on System Group & Teams Detail pages, plus inline panels to bulk-remove ex-employees and bulk-add active Melons.
 // @match        https://thepatch.melonlocal.com/SystemGroups/Edit*
 // @match        https://thepatch.melonlocal.com/Teams/Details*
 // @run-at       document-end
@@ -14,13 +14,7 @@
 (function () {
   "use strict";
 
-  // ============================================================
-  // CONSTANTS
-  // ============================================================
-
-  // Keep in sync with @version in the userscript header above.
   const VERSION = "patch-ex-employees-v2.3.0";
-
   const DEBUG = false;
   const debug = { DEBUGMODE: DEBUG };
 
@@ -60,13 +54,10 @@
   };
 
   const ENDPOINTS = {
-    // SystemGroups/Edit endpoints
     SG_REMOVE_MEMBER: "/SystemGroups/Edit?handler=RemoveTargetSystemGroupMember",
     SG_ADD_MEMBER: "/SystemGroups/Edit",
-    // Teams/Details endpoints
     TEAMS_ADD_MEMBER: "/Teams/AddTeamMember",
     TEAMS_REMOVE_MEMBER: "/Teams/RemoveTeamMember",
-    // Shared
     GET_MELONS: "/Lists/GetMelonVms",
   };
 
@@ -98,17 +89,13 @@
     return false;
   }
 
-  // ============================================================
-  // UTILITY FUNCTIONS
-  // ============================================================
-
-  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   function debounce(func, wait) {
-    let timeout;
-    return function executedFunction(...args) {
-      clearTimeout(timeout);
-      timeout = setTimeout(() => func(...args), wait);
+    let t;
+    return function (...args) {
+      clearTimeout(t);
+      t = setTimeout(() => func(...args), wait);
     };
   }
 
@@ -116,299 +103,109 @@
     return String(s || "").replace(/\u00a0/g, " ").replace(/\s+/g, " ").trim();
   }
 
-  function insertAfter(newNode, referenceNode) {
-    const parent = referenceNode?.parentNode;
-    if (!parent) return;
-    parent.insertBefore(newNode, referenceNode.nextSibling);
+  function insertAfter(newNode, ref) {
+    const p = ref?.parentNode;
+    if (p) p.insertBefore(newNode, ref.nextSibling);
   }
 
-  function log(message, ...args) {
-    if (DEBUG || debug.DEBUGMODE) {
-      console.log(`[PatchExEmployees] ${message}`, ...args);
-    }
+  function log(msg, ...a) {
+    if (DEBUG || debug.DEBUGMODE) console.log(`[PatchExEmployees] ${msg}`, ...a);
   }
-
-  function logError(message, ...args) {
-    console.error(`[PatchExEmployees] ${message}`, ...args);
+  function logError(msg, ...a) {
+    console.error(`[PatchExEmployees] ${msg}`, ...a);
   }
-
-  // ============================================================
-  // PAGE DETECTION
-  // ============================================================
-
+  // ── Page Detection ───────────────────────────────────────────
   const PageDetector = {
     get hrefLower() { return String(location.href || "").toLowerCase(); },
     get hostLower() { return String(location.hostname || "").toLowerCase(); },
-
-    get isPatch() {
-      return this.hostLower === "thepatch.melonlocal.com";
-    },
-
-    get isSystemGroupEdit() {
-      return this.isPatch && this.hrefLower.includes("/systemgroups/edit");
-    },
-
-    // NEW: Teams/Details page (e.g. /Teams/Details?id=1000001)
-    get isTeamsDetails() {
-      return this.isPatch && this.hrefLower.includes("/teams/details");
-    },
-
-    get isSupported() {
-      return this.isSystemGroupEdit || this.isTeamsDetails;
-    },
+    get isPatch() { return this.hostLower === "thepatch.melonlocal.com"; },
+    get isSystemGroupEdit() { return this.isPatch && this.hrefLower.includes("/systemgroups/edit"); },
+    get isTeamsDetails() { return this.isPatch && this.hrefLower.includes("/teams/details"); },
+    get isSupported() { return this.isSystemGroupEdit || this.isTeamsDetails; },
   };
 
-  // ============================================================
-  // GLOBAL STYLES (inline panel theming)
-  // ============================================================
-
+  // ── Global Styles ────────────────────────────────────────────
   function injectGlobalStyles() {
     if (document.getElementById("patch-ex-employees-styles")) return;
-    const styleTag = document.createElement("style");
-    styleTag.id = "patch-ex-employees-styles";
-    styleTag.textContent = `
-      .${PANEL_IDS.inlinePanelClass} {
-        margin-top: 12px;
-        padding: 12px 14px;
-        background: ${COLORS.alpine};
-        border: 1px solid ${COLORS.mojave};
-        border-radius: 8px;
-        font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
-        color: ${COLORS.coconut};
-        box-shadow: 0 1px 2px rgba(100, 68, 20, 0.08);
-      }
-      .${PANEL_IDS.inlinePanelClass}[hidden] { display: none !important; }
-      .${PANEL_IDS.inlinePanelClass}-header {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        margin-bottom: 8px;
-      }
-      .${PANEL_IDS.inlinePanelClass}-title {
-        font-size: 14px;
-        font-weight: 600;
-        color: ${COLORS.coconut};
-      }
-      .${PANEL_IDS.inlinePanelClass}-close {
-        background: none; border: none; cursor: pointer;
-        font-size: 20px; line-height: 1; color: ${COLORS.coconut}; padding: 0 6px;
-      }
-      .${PANEL_IDS.inlinePanelClass}-close:hover { color: ${COLORS.cranberry}; }
-      .${PANEL_IDS.inlinePanelStatusClass} {
-        margin-top: 6px;
-        font-size: 12px;
-        min-height: 16px;
-        color: ${COLORS.coconut};
-      }
-      .${PANEL_IDS.inlinePanelStatusClass}.is-error { color: ${COLORS.cranberry}; }
-      .${PANEL_IDS.inlinePanelStatusClass}.is-info  { color: ${COLORS.coconut}; }
-      .${PANEL_IDS.inlinePanelStatusClass}.is-warn  { color: ${COLORS.mustardSeed}; }
-      .${PANEL_IDS.inlinePanelStatusClass} .badge {
-        display: inline-block;
-        padding: 1px 6px;
-        border-radius: 10px;
-        background: ${COLORS.sand};
-        color: ${COLORS.coconut};
-        margin-left: 4px;
-        font-weight: 600;
-      }
-      .${PANEL_IDS.inlinePanelClass}-button-row {
-        display: flex; gap: 6px; justify-content: flex-end; margin-top: 10px;
-        flex-wrap: wrap;
-      }
-      .patch-inline-btn {
-        border: none;
-        padding: 7px 14px;
-        border-radius: 4px;
-        cursor: pointer;
-        font-size: 13px;
-        font-weight: 500;
-        transition: background-color 120ms ease;
-      }
-      .patch-inline-btn[disabled] { cursor: progress; opacity: 0.85; }
-      .patch-inline-btn--primary   { background: ${COLORS.cactus};          color: #fff; }
-      .patch-inline-btn--secondary { background: ${COLORS.sand};            color: ${COLORS.coconut}; }
-      .patch-inline-btn--danger    { background: ${COLORS.watermelonSugar}; color: #fff; }
-      .patch-inline-btn--busy      { background: ${COLORS.mustardSeed} !important; color: #fff !important; }
-      .patch-ex-employee-list {
-        margin-top: 4px;
-        padding: 8px;
-        background: #fff;
-        border: 1px solid ${COLORS.mojave};
-        border-radius: 4px;
-        max-height: 180px;
-        overflow-y: auto;
-        font-size: 12px;
-        color: ${COLORS.coconut};
-      }
-      .patch-ex-employee-list-empty {
-        color: ${COLORS.mustardSeed};
-        font-style: italic;
-      }
-      .patch-ex-employee-list-item {
-        padding: 2px 0;
-        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-      }
-      .${PANEL_IDS.chipMarkClass} {
-        background-color: ${COLORS.whitneyPink} !important;
-        border-color: ${COLORS.watermelonSugar} !important;
-        color: ${COLORS.cranberry} !important;
-      }
-      /* Teams/Details: highlight the whole <p> row for ex-employees */
-      .patch-ex-employee-row {
-        background: ${COLORS.whitneyPink} !important;
-        border-radius: 4px;
-        padding: 2px 4px;
-        color: ${COLORS.cranberry} !important;
-      }
-      .patch-add-members-search {
-        width: 100%;
-        box-sizing: border-box;
-        padding: 7px 10px;
-        font-size: 13px;
-        border: 1px solid ${COLORS.mojave};
-        border-radius: 4px;
-        margin-bottom: 6px;
-        background: #fff;
-        color: ${COLORS.coconut};
-      }
-      .patch-add-members-search:focus {
-        outline: none;
-        border-color: ${COLORS.cactus};
-        box-shadow: 0 0 0 2px rgba(71, 183, 79, 0.15);
-      }
-      .patch-add-members-list {
-        margin-top: 4px;
-        padding: 4px;
-        background: #fff;
-        border: 1px solid ${COLORS.mojave};
-        border-radius: 4px;
-        max-height: 280px;
-        overflow-y: auto;
-        font-size: 13px;
-        color: ${COLORS.coconut};
-      }
-      .patch-add-members-list-item {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        padding: 4px 6px;
-        border-radius: 3px;
-        cursor: pointer;
-        user-select: none;
-      }
-      .patch-add-members-list-item:hover {
-        background: ${COLORS.alpine};
-      }
-      .patch-add-members-list-item input[type="checkbox"] {
-        margin: 0;
-        cursor: pointer;
-        accent-color: ${COLORS.cactus};
-      }
-      .patch-add-members-list-item-name {
-        flex: 1;
-      }
-      .patch-add-members-list-item-id {
-        color: ${COLORS.mustardSeed};
-        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-        font-size: 11px;
-      }
-      .patch-add-members-list-empty {
-        padding: 8px;
-        color: ${COLORS.mustardSeed};
-        font-style: italic;
-      }
+    const s = document.createElement("style");
+    s.id = "patch-ex-employees-styles";
+    s.textContent = `
+      .patch-inline-panel{margin-top:12px;padding:12px 14px;background:${COLORS.alpine};border:1px solid ${COLORS.mojave};border-radius:8px;font-family:system-ui,-apple-system,"Segoe UI",sans-serif;color:${COLORS.coconut};box-shadow:0 1px 2px rgba(100,68,20,.08)}
+      .patch-inline-panel[hidden]{display:none!important}
+      .patch-inline-panel-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+      .patch-inline-panel-title{font-size:14px;font-weight:600;color:${COLORS.coconut}}
+      .patch-inline-panel-close{background:none;border:none;cursor:pointer;font-size:20px;line-height:1;color:${COLORS.coconut};padding:0 6px}
+      .patch-inline-panel-close:hover{color:${COLORS.cranberry}}
+      .patch-inline-status{margin-top:6px;font-size:12px;min-height:16px;color:${COLORS.coconut}}
+      .patch-inline-status.is-error{color:${COLORS.cranberry}}
+      .patch-inline-status.is-warn{color:${COLORS.mustardSeed}}
+      .patch-inline-status .badge{display:inline-block;padding:1px 6px;border-radius:10px;background:${COLORS.sand};color:${COLORS.coconut};margin-left:4px;font-weight:600}
+      .patch-inline-panel-button-row{display:flex;gap:6px;justify-content:flex-end;margin-top:10px;flex-wrap:wrap}
+      .patch-inline-btn{border:none;padding:7px 14px;border-radius:4px;cursor:pointer;font-size:13px;font-weight:500;transition:background-color 120ms ease}
+      .patch-inline-btn[disabled]{cursor:progress;opacity:.85}
+      .patch-inline-btn--primary{background:${COLORS.cactus};color:#fff}
+      .patch-inline-btn--secondary{background:${COLORS.sand};color:${COLORS.coconut}}
+      .patch-inline-btn--danger{background:${COLORS.watermelonSugar};color:#fff}
+      .patch-inline-btn--busy{background:${COLORS.mustardSeed}!important;color:#fff!important}
+      .patch-ex-employee-list{margin-top:4px;padding:8px;background:#fff;border:1px solid ${COLORS.mojave};border-radius:4px;max-height:180px;overflow-y:auto;font-size:12px;color:${COLORS.coconut}}
+      .patch-ex-employee-list-empty{color:${COLORS.mustardSeed};font-style:italic}
+      .patch-ex-employee-list-item{padding:2px 0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+      .patch-ex-employee-chip{background-color:${COLORS.whitneyPink}!important;border-color:${COLORS.watermelonSugar}!important;color:${COLORS.cranberry}!important}
+      .patch-ex-employee-row{background:${COLORS.whitneyPink}!important;border-radius:4px;padding:2px 4px;color:${COLORS.cranberry}!important}
+      .patch-add-members-search{width:100%;box-sizing:border-box;padding:7px 10px;font-size:13px;border:1px solid ${COLORS.mojave};border-radius:4px;margin-bottom:6px;background:#fff;color:${COLORS.coconut}}
+      .patch-add-members-search:focus{outline:none;border-color:${COLORS.cactus};box-shadow:0 0 0 2px rgba(71,183,79,.15)}
+      .patch-add-members-list{margin-top:4px;padding:4px;background:#fff;border:1px solid ${COLORS.mojave};border-radius:4px;max-height:280px;overflow-y:auto;font-size:13px;color:${COLORS.coconut}}
+      .patch-add-members-list-item{display:flex;align-items:center;gap:8px;padding:4px 6px;border-radius:3px;cursor:pointer;user-select:none}
+      .patch-add-members-list-item:hover{background:${COLORS.alpine}}
+      .patch-add-members-list-item input[type="checkbox"]{margin:0;cursor:pointer;accent-color:${COLORS.cactus}}
+      .patch-add-members-list-item-name{flex:1}
+      .patch-add-members-list-item-id{color:${COLORS.mustardSeed};font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px}
+      .patch-add-members-list-empty{padding:8px;color:${COLORS.mustardSeed};font-style:italic}
     `;
-    document.head.appendChild(styleTag);
+    document.head.appendChild(s);
   }
 
-  // ============================================================
-  // API CLIENT
-  // ============================================================
-
+  // ── API Client ───────────────────────────────────────────────
   const ApiClient = {
     getAntiforgeryToken() {
-      const input = document.querySelector('input[name="__RequestVerificationToken"]');
-      return input?.value || "";
+      return document.querySelector('input[name="__RequestVerificationToken"]')?.value || "";
     },
-
-    // SystemGroups/Edit: systemGroupId from hidden input or URL param
     getSystemGroupId() {
-      const hidden = document.querySelector('input[name="systemGroupId"]');
-      if (hidden?.value) return String(hidden.value);
-      const fromUrl = new URLSearchParams(window.location.search).get("systemGroupId");
-      return fromUrl ? String(fromUrl) : null;
+      const h = document.querySelector('input[name="systemGroupId"]');
+      if (h?.value) return String(h.value);
+      return new URLSearchParams(window.location.search).get("systemGroupId") || null;
     },
-
-    // Teams/Details: teamId from URL param "id"
     getTeamId() {
-      const fromUrl = new URLSearchParams(window.location.search).get("id");
-      return fromUrl ? String(fromUrl) : null;
+      return new URLSearchParams(window.location.search).get("id") || null;
     },
-
     async getActiveMelons() {
-      const res = await fetch(ENDPOINTS.GET_MELONS, { credentials: "same-origin" });
-      if (!res.ok) {
-        throw new Error(`HTTP ${res.status} ${res.statusText} fetching active melons`);
-      }
-      return await res.json();
+      const r = await fetch(ENDPOINTS.GET_MELONS, { credentials: "same-origin" });
+      if (!r.ok) throw new Error(`HTTP ${r.status} fetching active melons`);
+      return r.json();
     },
-
     async getActiveMelonIds() {
-      const melons = await this.getActiveMelons();
-      return new Set(melons.map((m) => m.MelonId));
+      return new Set((await this.getActiveMelons()).map((m) => m.MelonId));
     },
-
-    // ── SystemGroups add ──────────────────────────────────────
     async addMember({ systemGroupId, melonId, token }, opts = {}) {
-      return this._post(
-        ENDPOINTS.SG_ADD_MEMBER,
-        { SystemGroupId: Number(systemGroupId), MelonId: Number(melonId) },
-        token,
-        opts
-      );
+      return this._post(ENDPOINTS.SG_ADD_MEMBER, { SystemGroupId: Number(systemGroupId), MelonId: Number(melonId) }, token, opts);
     },
-
-    // ── SystemGroups remove ───────────────────────────────────
     async removeMember({ systemGroupId, melonId, token }, opts = {}) {
-      return this._post(
-        ENDPOINTS.SG_REMOVE_MEMBER,
-        { SystemGroupId: Number(systemGroupId), MelonId: Number(melonId) },
-        token,
-        opts
-      );
+      return this._post(ENDPOINTS.SG_REMOVE_MEMBER, { SystemGroupId: Number(systemGroupId), MelonId: Number(melonId) }, token, opts);
     },
-
-    // ── Teams/Details add ─────────────────────────────────────
     async addTeamMember({ teamId, melonId, token }, opts = {}) {
-      return this._post(
-        ENDPOINTS.TEAMS_ADD_MEMBER,
-        { TeamId: Number(teamId), MemberId: Number(melonId) },
-        token,
-        opts
-      );
+      return this._post(ENDPOINTS.TEAMS_ADD_MEMBER, { TeamId: Number(teamId), MemberId: Number(melonId) }, token, opts);
     },
-
-    // ── Teams/Details remove ──────────────────────────────────
     async removeTeamMember({ teamId, melonId, token }, opts = {}) {
-      return this._post(
-        ENDPOINTS.TEAMS_REMOVE_MEMBER,
-        { TeamId: Number(teamId), MemberId: Number(melonId) },
-        token,
-        opts
-      );
+      return this._post(ENDPOINTS.TEAMS_REMOVE_MEMBER, { TeamId: Number(teamId), MemberId: Number(melonId) }, token, opts);
     },
-
-    // ── Shared POST with retry ────────────────────────────────
     async _post(url, bodyObj, token, opts = {}) {
       const maxRetries = opts.maxRetries ?? TIMING.RETRY_MAX_ATTEMPTS;
       const baseBackoff = opts.baseBackoffMs ?? TIMING.RETRY_BASE_BACKOFF_MS;
       const body = JSON.stringify(bodyObj);
       let lastError;
-
       for (let attempt = 0; attempt <= maxRetries; attempt++) {
         try {
-          const response = await fetch(url, {
+          const res = await fetch(url, {
             method: "POST",
             credentials: "same-origin",
             headers: {
@@ -418,331 +215,174 @@
             },
             body,
           });
-
-          if (!response.ok) {
-            if (response.status >= 500 || response.status === 429) {
-              throw new Error(`HTTP ${response.status} ${response.statusText}`);
-            }
-            throw Object.assign(
-              new Error(`HTTP ${response.status} ${response.statusText}`),
-              { terminal: true }
-            );
+          if (!res.ok) {
+            if (res.status >= 500 || res.status === 429) throw new Error(`HTTP ${res.status}`);
+            throw Object.assign(new Error(`HTTP ${res.status}`), { terminal: true });
           }
           return;
-        } catch (error) {
-          lastError = error;
-          if (error?.terminal || attempt === maxRetries) break;
-          const backoff = baseBackoff * Math.pow(2, attempt);
-          log(`_post retry ${attempt + 1}/${maxRetries} for ${url} after ${backoff}ms`, error?.message);
-          await sleep(backoff);
+        } catch (err) {
+          lastError = err;
+          if (err?.terminal || attempt === maxRetries) break;
+          await sleep(baseBackoff * Math.pow(2, attempt));
         }
       }
-
       throw lastError ?? new Error("Unknown error in _post");
     },
   };
-
-  // ============================================================
-  // EX-EMPLOYEE OPERATIONS
-  // ============================================================
-
+  // ── Ex-Employee Operations ───────────────────────────────────
   const ExEmployeeOperations = {
-    /**
-     * Scan for ex-employees. Works on both page types.
-     *
-     * SystemGroups/Edit  → Kendo chips with [data-chip-id]
-     * Teams/Details      → <p> rows containing button[id^="removeMember_"]
-     */
     async scan() {
       let activeMelonIds;
       try {
         activeMelonIds = await ApiClient.getActiveMelonIds();
-      } catch (error) {
-        logError("Failed to load active melons:", error);
-        return { members: [], exEmployees: [], reason: "fetch-failed", error };
+      } catch (e) {
+        logError("Failed to load active melons:", e);
+        return { members: [], exEmployees: [], reason: "fetch-failed", error: e };
       }
 
-      // ── SystemGroups branch ──────────────────────────────────
       if (PageDetector.isSystemGroupEdit) {
         const container = document.getElementById("systemGroupMembersChipList");
         const chips = container
-          ? Array.from(container.querySelectorAll(".k-chip[data-chip-id], [data-chip-id]"))
+          ? Array.from(container.querySelectorAll(".k-chip[data-chip-id],[data-chip-id]"))
           : [];
-
-        if (!chips.length) {
-          return { members: chips, exEmployees: [], reason: "no-chips" };
-        }
-
+        if (!chips.length) return { members: [], exEmployees: [], reason: "no-chips" };
         const exEmployees = [];
         for (const chip of chips) {
           const melonId = Number(chip.getAttribute("data-chip-id"));
           if (!Number.isFinite(melonId)) continue;
-
           if (activeMelonIds.has(melonId)) {
             chip.classList.remove(PANEL_IDS.chipMarkClass);
-            if (chip.title === "Ex-employee (not in active Melons list)") {
-              chip.removeAttribute("title");
-            }
+            if (chip.title === "Ex-employee (not in active Melons list)") chip.removeAttribute("title");
             continue;
           }
-
           chip.classList.add(PANEL_IDS.chipMarkClass);
           chip.title = "Ex-employee (not in active Melons list)";
-          const name = normalizeText(chip.textContent) || `MelonId ${melonId}`;
-          exEmployees.push({ element: chip, melonId, name });
+          exEmployees.push({ element: chip, melonId, name: normalizeText(chip.textContent) || `MelonId ${melonId}` });
         }
-
         log("Scan complete (SystemGroups)", { total: chips.length, exEmployees: exEmployees.length });
         return { members: chips, exEmployees, reason: "ok" };
       }
 
-      // ── Teams/Details branch ─────────────────────────────────
       if (PageDetector.isTeamsDetails) {
-        const removeBtns = Array.from(
-          document.querySelectorAll('button[id^="removeMember_"]')
-        );
-
-        if (!removeBtns.length) {
-          return { members: [], exEmployees: [], reason: "no-chips" };
-        }
-
+        const btns = Array.from(document.querySelectorAll('button[id^="removeMember_"]'));
+        if (!btns.length) return { members: [], exEmployees: [], reason: "no-chips" };
         const exEmployees = [];
-        for (const btn of removeBtns) {
+        for (const btn of btns) {
           const melonId = parseInt(btn.id.replace("removeMember_", ""), 10);
           if (!Number.isFinite(melonId)) continue;
-
-          const rowEl = btn.parentElement; // the <p> element
-
+          const rowEl = btn.parentElement;
           if (activeMelonIds.has(melonId)) {
             rowEl?.classList.remove("patch-ex-employee-row");
-            if (rowEl?.title === "Ex-employee (not in active Melons list)") {
-              rowEl.removeAttribute("title");
-            }
+            if (rowEl?.title === "Ex-employee (not in active Melons list)") rowEl.removeAttribute("title");
             continue;
           }
-
           rowEl?.classList.add("patch-ex-employee-row");
           if (rowEl) rowEl.title = "Ex-employee (not in active Melons list)";
-
-          // Extract name: the <p> text minus the button text
-          const rawName = normalizeText(
-            (rowEl?.childNodes[0]?.textContent || "")
-          );
-          const name = rawName || `MelonId ${melonId}`;
+          const name = normalizeText(rowEl?.childNodes[0]?.textContent || "") || `MelonId ${melonId}`;
           exEmployees.push({ element: btn, rowEl, melonId, name });
         }
-
-        log("Scan complete (Teams)", { total: removeBtns.length, exEmployees: exEmployees.length });
-        return { members: removeBtns, exEmployees, reason: "ok" };
+        log("Scan complete (Teams)", { total: btns.length, exEmployees: exEmployees.length });
+        return { members: btns, exEmployees, reason: "ok" };
       }
 
       return { members: [], exEmployees: [], reason: "no-chips" };
     },
 
-    /**
-     * Remove ex-employees one at a time via the API.
-     * Routes to the correct endpoint based on current page type.
-     */
     async run(exEmployees, delayMs = TIMING.DEFAULT_DELAY_MS, opts = {}) {
-      if (!exEmployees.length) {
-        return { ok: false, reason: "empty", message: "Nothing to remove." };
-      }
-
+      if (!exEmployees.length) return { ok: false, reason: "empty", message: "Nothing to remove." };
       const token = ApiClient.getAntiforgeryToken();
-
-      // ── Determine page context ────────────────────────────────
       let groupId, removeOneFn;
-
       if (PageDetector.isSystemGroupEdit) {
         groupId = ApiClient.getSystemGroupId();
-        if (!token || !groupId) {
-          logError("API remove unavailable (SG)", { hasToken: !!token, groupId });
-          return {
-            ok: false,
-            reason: "no-api",
-            message: "Cannot remove via API: missing anti-forgery token or systemGroupId.",
-          };
-        }
-        removeOneFn = (entry) =>
-          ApiClient.removeMember({ systemGroupId: groupId, melonId: entry.melonId, token });
-
+        if (!token || !groupId) return { ok: false, reason: "no-api", message: "Cannot remove: missing token or systemGroupId." };
+        removeOneFn = (e) => ApiClient.removeMember({ systemGroupId: groupId, melonId: e.melonId, token });
       } else if (PageDetector.isTeamsDetails) {
         groupId = ApiClient.getTeamId();
-        if (!token || !groupId) {
-          logError("API remove unavailable (Teams)", { hasToken: !!token, groupId });
-          return {
-            ok: false,
-            reason: "no-api",
-            message: "Cannot remove via API: missing anti-forgery token or teamId.",
-          };
-        }
-        removeOneFn = (entry) =>
-          ApiClient.removeTeamMember({ teamId: groupId, melonId: entry.melonId, token });
-
+        if (!token || !groupId) return { ok: false, reason: "no-api", message: "Cannot remove: missing token or teamId." };
+        removeOneFn = (e) => ApiClient.removeTeamMember({ teamId: groupId, melonId: e.melonId, token });
       } else {
         return { ok: false, reason: "no-api", message: "Unsupported page." };
       }
-
       let removed = 0;
       const failed = [];
-
       for (let i = 0; i < exEmployees.length; i++) {
         const entry = exEmployees[i];
         try {
           await removeOneFn(entry);
-          // Remove the DOM element (chip or <p> row)
-          try {
-            if (entry.rowEl) {
-              entry.rowEl.remove();          // Teams: remove the whole <p>
-            } else {
-              entry.element.remove();        // SystemGroups: remove the chip
-            }
-          } catch (_) {}
+          try { (entry.rowEl || entry.element).remove(); } catch (_) {}
           removed++;
           await sleep(delayMs);
-        } catch (error) {
-          logError(`API remove failed for MelonId ${entry.melonId}:`, error?.message || error);
+        } catch (e) {
+          logError(`Remove failed MelonId ${entry.melonId}:`, e?.message);
           failed.push(entry);
         }
-
-        if (opts.onProgress)
-          opts.onProgress({ completed: i + 1, total: exEmployees.length, phase: "Removing" });
+        opts.onProgress?.({ completed: i + 1, total: exEmployees.length, phase: "Removing" });
       }
-
       return {
-        ok: true,
-        completed: removed,
-        total: exEmployees.length,
-        failed,
-        reload: removed > 0,
-        message:
-          `Removed ${removed} of ${exEmployees.length} ex-employee(s)` +
-          (failed.length ? `  •  Failed: ${failed.length}` : ""),
+        ok: true, completed: removed, total: exEmployees.length, failed, reload: removed > 0,
+        message: `Removed ${removed} of ${exEmployees.length} ex-employee(s)` + (failed.length ? `  •  Failed: ${failed.length}` : ""),
       };
     },
   };
 
-  // ============================================================
-  // ADD-MEMBER OPERATIONS
-  // ============================================================
-
+  // ── Add-Member Operations ────────────────────────────────────
   const AddMemberOperations = {
-    /**
-     * Read MelonIds for everyone currently listed, so the picker can hide them.
-     * Works on both page types.
-     */
     getCurrentMemberIds() {
       const ids = new Set();
-
       if (PageDetector.isSystemGroupEdit) {
-        const container = document.getElementById("systemGroupMembersChipList");
-        if (!container) return ids;
-        const chips = container.querySelectorAll(".k-chip[data-chip-id], [data-chip-id]");
-        for (const chip of chips) {
+        const c = document.getElementById("systemGroupMembersChipList");
+        if (c) for (const chip of c.querySelectorAll(".k-chip[data-chip-id],[data-chip-id]")) {
           const id = Number(chip.getAttribute("data-chip-id"));
           if (Number.isFinite(id)) ids.add(id);
         }
-
       } else if (PageDetector.isTeamsDetails) {
-        const removeBtns = document.querySelectorAll('button[id^="removeMember_"]');
-        for (const btn of removeBtns) {
+        for (const btn of document.querySelectorAll('button[id^="removeMember_"]')) {
           const id = parseInt(btn.id.replace("removeMember_", ""), 10);
           if (Number.isFinite(id)) ids.add(id);
         }
       }
-
       return ids;
     },
-
     async getCandidates() {
       const all = await ApiClient.getActiveMelons();
       const current = this.getCurrentMemberIds();
       const candidates = all
-        .filter((m) => Number.isFinite(Number(m?.MelonId)))
-        .filter((m) => !current.has(Number(m.MelonId)));
+        .filter((m) => Number.isFinite(Number(m?.MelonId)) && !current.has(Number(m.MelonId)));
       candidates.sort((a, b) => melonDisplayName(a).localeCompare(melonDisplayName(b)));
       log("Add-member candidates", { total: all.length, alreadyMembers: current.size, candidates: candidates.length });
       return candidates;
     },
-
-    /**
-     * Add each selected melon.
-     * Routes to the correct endpoint based on current page type.
-     */
     async run(melons, delayMs = TIMING.DEFAULT_DELAY_MS, opts = {}) {
-      if (!melons.length) {
-        return { ok: false, reason: "empty", message: "Nothing to add." };
-      }
-
+      if (!melons.length) return { ok: false, reason: "empty", message: "Nothing to add." };
       const token = ApiClient.getAntiforgeryToken();
-
       let groupId, addOneFn;
-
       if (PageDetector.isSystemGroupEdit) {
         groupId = ApiClient.getSystemGroupId();
-        if (!token || !groupId) {
-          logError("API add unavailable (SG)", { hasToken: !!token, groupId });
-          return {
-            ok: false,
-            reason: "no-api",
-            message: "Cannot add via API: missing anti-forgery token or systemGroupId.",
-          };
-        }
-        addOneFn = (m) =>
-          ApiClient.addMember({ systemGroupId: groupId, melonId: m.MelonId, token });
-
+        if (!token || !groupId) return { ok: false, reason: "no-api", message: "Cannot add: missing token or systemGroupId." };
+        addOneFn = (m) => ApiClient.addMember({ systemGroupId: groupId, melonId: m.MelonId, token });
       } else if (PageDetector.isTeamsDetails) {
         groupId = ApiClient.getTeamId();
-        if (!token || !groupId) {
-          logError("API add unavailable (Teams)", { hasToken: !!token, groupId });
-          return {
-            ok: false,
-            reason: "no-api",
-            message: "Cannot add via API: missing anti-forgery token or teamId.",
-          };
-        }
-        addOneFn = (m) =>
-          ApiClient.addTeamMember({ teamId: groupId, melonId: m.MelonId, token });
-
+        if (!token || !groupId) return { ok: false, reason: "no-api", message: "Cannot add: missing token or teamId." };
+        addOneFn = (m) => ApiClient.addTeamMember({ teamId: groupId, melonId: m.MelonId, token });
       } else {
         return { ok: false, reason: "no-api", message: "Unsupported page." };
       }
-
       let added = 0;
       const failed = [];
-
       for (let i = 0; i < melons.length; i++) {
         const m = melons[i];
-        try {
-          await addOneFn(m);
-          added++;
-          await sleep(delayMs);
-        } catch (error) {
-          logError(`API add failed for MelonId ${m.MelonId}:`, error?.message || error);
-          failed.push(m);
-        }
-
-        if (opts.onProgress)
-          opts.onProgress({ completed: i + 1, total: melons.length, phase: "Adding" });
+        try { await addOneFn(m); added++; await sleep(delayMs); }
+        catch (e) { logError(`Add failed MelonId ${m.MelonId}:`, e?.message); failed.push(m); }
+        opts.onProgress?.({ completed: i + 1, total: melons.length, phase: "Adding" });
       }
-
       return {
-        ok: true,
-        completed: added,
-        total: melons.length,
-        failed,
-        reload: added > 0,
-        message:
-          `Added ${added} of ${melons.length} member(s)` +
-          (failed.length ? `  •  Failed: ${failed.length}` : ""),
+        ok: true, completed: added, total: melons.length, failed, reload: added > 0,
+        message: `Added ${added} of ${melons.length} member(s)` + (failed.length ? `  •  Failed: ${failed.length}` : ""),
       };
     },
   };
 
-  // ============================================================
-  // INLINE DASHBOARD HELPERS
-  // ============================================================
-
+  // ── Inline Dashboard Helpers ─────────────────────────────────
   const InlineDashboard = {
     makeButton(text, variant = "primary") {
       const btn = document.createElement("button");
@@ -750,27 +390,16 @@
       btn.textContent = text;
       btn.className = `patch-inline-btn patch-inline-btn--${variant}`;
       btn.dataset.originalText = text;
-      btn.dataset.originalVariant = variant;
       return btn;
     },
-
     setBusy(btn, busy, label) {
-      if (busy) {
-        btn.disabled = true;
-        btn.classList.add("patch-inline-btn--busy");
-        if (label != null) btn.textContent = label;
-      } else {
-        btn.disabled = false;
-        btn.classList.remove("patch-inline-btn--busy");
-        btn.textContent = btn.dataset.originalText || btn.textContent;
-      }
+      btn.disabled = busy;
+      btn.classList.toggle("patch-inline-btn--busy", busy);
+      if (busy && label != null) btn.textContent = label;
+      else if (!busy) btn.textContent = btn.dataset.originalText || btn.textContent;
     },
   };
-
-  // ============================================================
-  // PANEL BUILDER — Ex-Employees
-  // ============================================================
-
+  // ── Ex-Employee Panel ────────────────────────────────────────
   function buildExEmployeePanel() {
     const panel = document.createElement("div");
     panel.id = PANEL_IDS.panelId;
@@ -780,66 +409,47 @@
 
     const header = document.createElement("div");
     header.className = `${PANEL_IDS.inlinePanelClass}-header`;
-
     const titleEl = document.createElement("div");
     titleEl.className = `${PANEL_IDS.inlinePanelClass}-title`;
     titleEl.textContent = "Remove Ex-Employees";
-
     const closeBtn = document.createElement("button");
     closeBtn.type = "button";
     closeBtn.className = `${PANEL_IDS.inlinePanelClass}-close`;
     closeBtn.setAttribute("aria-label", "Close");
     closeBtn.textContent = "×";
-
-    header.appendChild(titleEl);
-    header.appendChild(closeBtn);
+    header.append(titleEl, closeBtn);
 
     const list = document.createElement("div");
     list.className = "patch-ex-employee-list";
-
     const status = document.createElement("div");
     status.className = `${PANEL_IDS.inlinePanelStatusClass} is-info`;
-
     const btnRow = document.createElement("div");
     btnRow.className = `${PANEL_IDS.inlinePanelClass}-button-row`;
-
-    const cancelBtn  = InlineDashboard.makeButton("Cancel", "secondary");
-    const rescanBtn  = InlineDashboard.makeButton("Rescan", "secondary");
-    const removeBtn  = InlineDashboard.makeButton("Remove Ex-Employees", "danger");
-
-    btnRow.appendChild(cancelBtn);
-    btnRow.appendChild(rescanBtn);
-    btnRow.appendChild(removeBtn);
-
-    panel.appendChild(header);
-    panel.appendChild(list);
-    panel.appendChild(status);
-    panel.appendChild(btnRow);
+    const cancelBtn = InlineDashboard.makeButton("Cancel", "secondary");
+    const rescanBtn = InlineDashboard.makeButton("Rescan", "secondary");
+    const removeBtn = InlineDashboard.makeButton("Remove Ex-Employees", "danger");
+    btnRow.append(cancelBtn, rescanBtn, removeBtn);
+    panel.append(header, list, status, btnRow);
 
     let lastScan = { exEmployees: [], reason: "pending" };
 
     const countMembers = () => {
-      if (PageDetector.isSystemGroupEdit) {
-        return document.querySelectorAll(
-          "#systemGroupMembersChipList .k-chip[data-chip-id], #systemGroupMembersChipList [data-chip-id]"
-        ).length;
-      }
-      if (PageDetector.isTeamsDetails) {
+      if (PageDetector.isSystemGroupEdit)
+        return document.querySelectorAll("#systemGroupMembersChipList .k-chip[data-chip-id],#systemGroupMembersChipList [data-chip-id]").length;
+      if (PageDetector.isTeamsDetails)
         return document.querySelectorAll('button[id^="removeMember_"]').length;
-      }
       return 0;
     };
 
     const renderList = () => {
       list.innerHTML = "";
       if (!lastScan.exEmployees.length) {
-        const empty = document.createElement("div");
-        empty.className = "patch-ex-employee-list-empty";
-        empty.textContent =
-          lastScan.reason === "pending"
-            ? "Click Rescan to detect ex-employees."
-            : "No ex-employees detected.";
-        list.appendChild(empty);
+        const e = document.createElement("div");
+        e.className = "patch-ex-employee-list-empty";
+        e.textContent = lastScan.reason === "pending"
+          ? "Click Rescan to detect ex-employees."
+          : "No ex-employees detected.";
+        list.appendChild(e);
         return;
       }
       for (const entry of lastScan.exEmployees) {
@@ -852,13 +462,11 @@
 
     const renderStatus = () => {
       status.classList.remove("is-error", "is-warn", "is-info");
-      const onPage   = countMembers();
-      const count    = lastScan.exEmployees.length;
-      const onPageBadge = `<span class="badge">${onPage} on page</span>`;
-
+      const onPage = countMembers();
+      const badge = `<span class="badge">${onPage} on page</span>`;
       if (lastScan.reason === "fetch-failed") {
         status.classList.add("is-error");
-        status.innerHTML = `Could not fetch active melons. ${onPageBadge}`;
+        status.innerHTML = `Could not fetch active melons. ${badge}`;
         return;
       }
       if (lastScan.reason === "no-chips") {
@@ -868,63 +476,41 @@
       }
       if (lastScan.reason === "pending") {
         status.classList.add("is-info");
-        status.innerHTML = `Ready. ${onPageBadge}`;
+        status.innerHTML = `Ready. ${badge}`;
         return;
       }
       status.classList.add("is-info");
-      status.innerHTML = count
-        ? `Found <strong>${count}</strong> ex-employee(s). ${onPageBadge}`
-        : `No ex-employees found. ${onPageBadge}`;
+      status.innerHTML = lastScan.exEmployees.length
+        ? `Found <strong>${lastScan.exEmployees.length}</strong> ex-employee(s). ${badge}`
+        : `No ex-employees found. ${badge}`;
     };
 
-    const updateRemoveBtnState = () => {
-      removeBtn.disabled = lastScan.exEmployees.length === 0;
-    };
+    const updateRemoveBtnState = () => { removeBtn.disabled = !lastScan.exEmployees.length; };
 
     const rescan = async () => {
       InlineDashboard.setBusy(rescanBtn, true, "Scanning...");
-      try {
-        lastScan = await ExEmployeeOperations.scan();
-      } catch (error) {
-        logError("Rescan failed:", error);
-        lastScan = { exEmployees: [], reason: "fetch-failed", error };
-      }
+      try { lastScan = await ExEmployeeOperations.scan(); }
+      catch (e) { logError("Rescan failed:", e); lastScan = { exEmployees: [], reason: "fetch-failed", error: e }; }
       InlineDashboard.setBusy(rescanBtn, false);
-      renderList();
-      renderStatus();
-      updateRemoveBtnState();
+      renderList(); renderStatus(); updateRemoveBtnState();
     };
 
     const close = () => { panel.hidden = true; };
-
     cancelBtn.addEventListener("click", close);
     closeBtn.addEventListener("click", close);
-    rescanBtn.addEventListener("click", () => { rescan(); });
+    rescanBtn.addEventListener("click", rescan);
 
     removeBtn.addEventListener("click", async () => {
       if (removeBtn.disabled) return;
       const count = lastScan.exEmployees.length;
-      if (!count) return;
-      if (!confirm(`Remove ${count} ex-employee(s) from this group? This cannot be undone.`)) return;
-
-      cancelBtn.disabled = true;
-      rescanBtn.disabled = true;
+      if (!count || !confirm(`Remove ${count} ex-employee(s) from this group? This cannot be undone.`)) return;
+      cancelBtn.disabled = rescanBtn.disabled = true;
       InlineDashboard.setBusy(removeBtn, true, `(0/${count}) Removing...`);
-
-      const onProgress = ({ completed, total }) => {
-        removeBtn.textContent = `(${completed}/${total}) Removing...`;
-      };
-
-      const result = await ExEmployeeOperations.run(
-        lastScan.exEmployees,
-        TIMING.DEFAULT_DELAY_MS,
-        { onProgress }
-      );
-
+      const result = await ExEmployeeOperations.run(lastScan.exEmployees, TIMING.DEFAULT_DELAY_MS, {
+        onProgress: ({ completed, total }) => { removeBtn.textContent = `(${completed}/${total}) Removing...`; },
+      });
       InlineDashboard.setBusy(removeBtn, false);
-      cancelBtn.disabled = false;
-      rescanBtn.disabled = false;
-
+      cancelBtn.disabled = rescanBtn.disabled = false;
       status.classList.remove("is-info", "is-warn", "is-error");
       if (result.ok) {
         status.classList.add("is-info");
@@ -941,34 +527,17 @@
       }
     });
 
-    renderList();
-    renderStatus();
-    updateRemoveBtnState();
+    renderList(); renderStatus(); updateRemoveBtnState();
 
     return {
-      panel,
-      rescan,
-      show: async () => {
-        panel.hidden = false;
-        await rescan();
-      },
+      panel, rescan,
+      show: async () => { panel.hidden = false; await rescan(); },
       hide: close,
-      toggle: async () => {
-        if (panel.hidden) {
-          panel.hidden = false;
-          await rescan();
-        } else {
-          close();
-        }
-      },
+      toggle: async () => { if (panel.hidden) { panel.hidden = false; await rescan(); } else close(); },
       isVisible: () => !panel.hidden,
     };
   }
-
-  // ============================================================
-  // PANEL BUILDER — Add Members
-  // ============================================================
-
+  // ── Add Members Panel ────────────────────────────────────────
   function buildAddMembersPanel() {
     const panel = document.createElement("div");
     panel.id = PANEL_IDS.addPanelId;
@@ -986,8 +555,7 @@
     closeBtn.className = `${PANEL_IDS.inlinePanelClass}-close`;
     closeBtn.setAttribute("aria-label", "Close");
     closeBtn.textContent = "×";
-    header.appendChild(titleEl);
-    header.appendChild(closeBtn);
+    header.append(titleEl, closeBtn);
 
     const search = document.createElement("input");
     search.type = "text";
@@ -996,33 +564,19 @@
 
     const list = document.createElement("div");
     list.className = "patch-add-members-list";
-
     const status = document.createElement("div");
     status.className = `${PANEL_IDS.inlinePanelStatusClass} is-info`;
-
     const btnRow = document.createElement("div");
     btnRow.className = `${PANEL_IDS.inlinePanelClass}-button-row`;
     const cancelBtn        = InlineDashboard.makeButton("Cancel", "secondary");
     const refreshBtn       = InlineDashboard.makeButton("Refresh", "secondary");
-    const selectVisibleBtn = InlineDashboard.makeButton("Select visible", "secondary");
     const clearBtn         = InlineDashboard.makeButton("Clear", "secondary");
+    const selectVisibleBtn = InlineDashboard.makeButton("Select visible", "secondary");
     const addBtn           = InlineDashboard.makeButton("Add Selected", "primary");
-    btnRow.appendChild(cancelBtn);
-    btnRow.appendChild(refreshBtn);
-    btnRow.appendChild(clearBtn);
-    btnRow.appendChild(selectVisibleBtn);
-    btnRow.appendChild(addBtn);
+    btnRow.append(cancelBtn, refreshBtn, clearBtn, selectVisibleBtn, addBtn);
+    panel.append(header, search, list, status, btnRow);
 
-    panel.appendChild(header);
-    panel.appendChild(search);
-    panel.appendChild(list);
-    panel.appendChild(status);
-    panel.appendChild(btnRow);
-
-    let allCandidates = [];
-    let filtered = [];
-    let selected = new Map(); // MelonId -> melon object
-    let loadState = "pending"; // pending | ok | error
+    let allCandidates = [], filtered = [], selected = new Map(), loadState = "pending";
 
     const renderStatus = () => {
       status.classList.remove("is-error", "is-warn", "is-info");
@@ -1032,70 +586,48 @@
         return;
       }
       status.classList.add("is-info");
-      const sel   = selected.size;
-      const shown = filtered.length;
-      const total = allCandidates.length;
       status.innerHTML =
-        `<strong>${sel}</strong> selected ` +
-        `<span class="badge">${shown} shown</span> ` +
-        `<span class="badge">${total} addable</span>`;
+        `<strong>${selected.size}</strong> selected  ` +
+        `<span class="badge">${filtered.length} shown</span>  ` +
+        `<span class="badge">${allCandidates.length} addable</span>`;
     };
 
-    const updateAddBtnState = () => {
-      addBtn.disabled = selected.size === 0;
-    };
+    const updateAddBtnState = () => { addBtn.disabled = selected.size === 0; };
 
     const renderList = () => {
       list.innerHTML = "";
-      if (loadState === "pending") {
-        const empty = document.createElement("div");
-        empty.className = "patch-add-members-list-empty";
-        empty.textContent = "Loading active Melons...";
-        list.appendChild(empty);
-        return;
-      }
-      if (loadState === "error") {
-        const empty = document.createElement("div");
-        empty.className = "patch-add-members-list-empty";
-        empty.textContent = "Failed to load. Try Refresh.";
-        list.appendChild(empty);
-        return;
-      }
+      const makeEmpty = (text) => {
+        const d = document.createElement("div");
+        d.className = "patch-add-members-list-empty";
+        d.textContent = text;
+        list.appendChild(d);
+      };
+      if (loadState === "pending") { makeEmpty("Loading active Melons..."); return; }
+      if (loadState === "error")   { makeEmpty("Failed to load. Try Refresh."); return; }
       if (!filtered.length) {
-        const empty = document.createElement("div");
-        empty.className = "patch-add-members-list-empty";
-        empty.textContent = allCandidates.length
+        makeEmpty(allCandidates.length
           ? "No matches for that search."
-          : "No melons available to add (everyone is already a member).";
-        list.appendChild(empty);
+          : "No melons available to add (everyone is already a member).");
         return;
       }
       const frag = document.createDocumentFragment();
       for (const m of filtered) {
         const row = document.createElement("label");
         row.className = "patch-add-members-list-item";
-
         const cb = document.createElement("input");
         cb.type = "checkbox";
         cb.checked = selected.has(m.MelonId);
         cb.addEventListener("change", () => {
-          if (cb.checked) selected.set(m.MelonId, m);
-          else selected.delete(m.MelonId);
-          renderStatus();
-          updateAddBtnState();
+          if (cb.checked) selected.set(m.MelonId, m); else selected.delete(m.MelonId);
+          renderStatus(); updateAddBtnState();
         });
-
         const nameEl = document.createElement("span");
         nameEl.className = "patch-add-members-list-item-name";
         nameEl.textContent = melonDisplayName(m);
-
         const idEl = document.createElement("span");
         idEl.className = "patch-add-members-list-item-id";
         idEl.textContent = `#${m.MelonId}`;
-
-        row.appendChild(cb);
-        row.appendChild(nameEl);
-        row.appendChild(idEl);
+        row.append(cb, nameEl, idEl);
         frag.appendChild(row);
       }
       list.appendChild(frag);
@@ -1103,81 +635,52 @@
 
     const applyFilter = () => {
       const q = (search.value || "").toLowerCase().trim();
-      filtered = q
-        ? allCandidates.filter((m) => melonMatchesQuery(m, q))
-        : allCandidates.slice();
-      renderList();
-      renderStatus();
+      filtered = q ? allCandidates.filter((m) => melonMatchesQuery(m, q)) : allCandidates.slice();
+      renderList(); renderStatus();
     };
 
     const refresh = async () => {
       loadState = "pending";
       InlineDashboard.setBusy(refreshBtn, true, "Loading...");
-      renderList();
-      renderStatus();
+      renderList(); renderStatus();
       try {
         allCandidates = await AddMemberOperations.getCandidates();
         const stillValid = new Set(allCandidates.map((m) => m.MelonId));
-        for (const id of [...selected.keys()]) {
-          if (!stillValid.has(id)) selected.delete(id);
-        }
+        for (const id of [...selected.keys()]) { if (!stillValid.has(id)) selected.delete(id); }
         loadState = "ok";
-      } catch (error) {
-        logError("Failed to load candidates:", error);
+      } catch (e) {
+        logError("Failed to load candidates:", e);
         allCandidates = [];
         loadState = "error";
       }
       InlineDashboard.setBusy(refreshBtn, false);
-      applyFilter();
-      updateAddBtnState();
+      applyFilter(); updateAddBtnState();
     };
 
     const close = () => { panel.hidden = true; };
     cancelBtn.addEventListener("click", close);
     closeBtn.addEventListener("click", close);
-    refreshBtn.addEventListener("click", () => { refresh(); });
-
-    clearBtn.addEventListener("click", () => {
-      selected.clear();
-      renderList();
-      renderStatus();
-      updateAddBtnState();
-    });
-
+    refreshBtn.addEventListener("click", refresh);
+    clearBtn.addEventListener("click", () => { selected.clear(); renderList(); renderStatus(); updateAddBtnState(); });
     selectVisibleBtn.addEventListener("click", () => {
       for (const m of filtered) selected.set(m.MelonId, m);
-      renderList();
-      renderStatus();
-      updateAddBtnState();
+      renderList(); renderStatus(); updateAddBtnState();
     });
-
     search.addEventListener("input", debounce(applyFilter, 100));
 
     addBtn.addEventListener("click", async () => {
       if (addBtn.disabled) return;
       const picks = [...selected.values()];
-      if (!picks.length) return;
-      if (!confirm(`Add ${picks.length} member(s) to this group?`)) return;
-
-      cancelBtn.disabled = true;
-      refreshBtn.disabled = true;
-      clearBtn.disabled = true;
-      selectVisibleBtn.disabled = true;
+      if (!picks.length || !confirm(`Add ${picks.length} member(s) to this group?`)) return;
+      [cancelBtn, refreshBtn, clearBtn, selectVisibleBtn].forEach((b) => (b.disabled = true));
       search.disabled = true;
       InlineDashboard.setBusy(addBtn, true, `(0/${picks.length}) Adding...`);
-      const onProgress = ({ completed, total }) => {
-        addBtn.textContent = `(${completed}/${total}) Adding...`;
-      };
-
-      const result = await AddMemberOperations.run(picks, TIMING.DEFAULT_DELAY_MS, { onProgress });
-
+      const result = await AddMemberOperations.run(picks, TIMING.DEFAULT_DELAY_MS, {
+        onProgress: ({ completed, total }) => { addBtn.textContent = `(${completed}/${total}) Adding...`; },
+      });
       InlineDashboard.setBusy(addBtn, false);
-      cancelBtn.disabled = false;
-      refreshBtn.disabled = false;
-      clearBtn.disabled = false;
-      selectVisibleBtn.disabled = false;
+      [cancelBtn, refreshBtn, clearBtn, selectVisibleBtn].forEach((b) => (b.disabled = false));
       search.disabled = false;
-
       status.classList.remove("is-info", "is-warn", "is-error");
       if (result.ok) {
         status.classList.add("is-info");
@@ -1192,13 +695,10 @@
       }
     });
 
-    renderList();
-    renderStatus();
-    updateAddBtnState();
+    renderList(); renderStatus(); updateAddBtnState();
 
     return {
-      panel,
-      refresh,
+      panel, refresh,
       show: async () => {
         panel.hidden = false;
         await refresh();
@@ -1217,60 +717,36 @@
       isVisible: () => !panel.hidden,
     };
   }
-
-  // ============================================================
-  // BUTTON INJECTION
-  // ============================================================
-
+  // ── Button Injector ──────────────────────────────────────────
   const ButtonInjector = {
     _dashboard: null,
     _addDashboard: null,
 
-    /**
-     * Pick an anchor element to insert the trigger buttons before.
-     * Returns { anchorParent, anchorEl } or null if not yet ready.
-     */
-    findAnchor() {
-      if (PageDetector.isSystemGroupEdit) {
-        const chipList = document.getElementById("systemGroupMembersChipList");
-        if (!chipList) return null;
-        return { anchorParent: chipList.parentElement, anchorEl: chipList };
-      }
-
-      if (PageDetector.isTeamsDetails) {
-        // Prefer the container that wraps all member <p> rows.
-        const firstRow = document.querySelector('button[id^="removeMember_"]')?.parentElement;
-        const container = firstRow?.parentElement;
-        if (container) {
-          return { anchorParent: container.parentElement || container, anchorEl: container };
-        }
-        // Fallback: a heading that looks like "Team Members" / "Members".
-        const heading = [...document.querySelectorAll("h1, h2, h3, h4, h5, h6, label")]
-          .find((el) => /\b(team\s*)?members?\b/i.test(el.textContent || "") && (el.textContent || "").length < 60);
-        if (heading) {
-          return { anchorParent: heading.parentElement, anchorEl: heading.nextSibling || heading };
-        }
-        return null;
-      }
-
-      return null;
-    },
-
     inject() {
       if (!PageDetector.isSupported) return;
+
       const haveExBtn  = !!document.getElementById(PANEL_IDS.triggerBtnId);
       const haveAddBtn = !!document.getElementById(PANEL_IDS.addTriggerBtnId);
       if (haveExBtn && haveAddBtn) return;
 
-      const anchor = this.findAnchor();
+      // Find the anchor element to inject next to
+      let anchor = null;
+      if (PageDetector.isSystemGroupEdit) {
+        anchor = document.getElementById("systemGroupMembersChipList");
+      } else if (PageDetector.isTeamsDetails) {
+        // Use the first removeMember button's parent's parent (the .dashboard-panel)
+        const firstBtn = document.querySelector('button[id^="removeMember_"]');
+        anchor = firstBtn?.closest(".dashboard-panel") || firstBtn?.parentElement || null;
+      }
+
       if (!anchor) return;
-      const { anchorParent, anchorEl } = anchor;
-      if (!anchorParent || !anchorEl) return;
 
       const exDashboard  = haveExBtn  ? this._dashboard    : buildExEmployeePanel();
-      const addDashboard = haveAddBtn ? this._addDashboard : buildAddMembersPanel();
+      const addDashboard = haveAddBtn ? this._addDashboard  : buildAddMembersPanel();
       this._dashboard    = exDashboard;
       this._addDashboard = addDashboard;
+
+      const anchorParent = anchor.parentElement;
 
       const buildTriggerBtn = (id, text, onClick) => {
         const btn = document.createElement("button");
@@ -1278,7 +754,7 @@
         btn.id = id;
         btn.className = "btn btn--small melon-green";
         btn.style.marginBottom = "10px";
-        btn.style.marginRight = "10px";
+        btn.style.marginRight  = "10px";
         btn.textContent = text;
         btn.addEventListener("click", onClick);
         return btn;
@@ -1290,53 +766,37 @@
           exDashboard.hide();
           addDashboard.toggle();
         });
-        try {
-          anchorParent.insertBefore(addTrigger, anchorEl);
-        } catch (_) {
-          anchorEl.parentElement?.insertBefore(addTrigger, anchorEl);
-        }
+        if (anchorParent) anchorParent.insertBefore(addTrigger, anchor);
+        else anchor.before(addTrigger);
         insertAfter(addDashboard.panel, addTrigger);
       }
 
-      // Remove Ex-Employees trigger (mounted after Add Members button so the
-      // visual order is "Add | Remove" reading left-to-right).
+      // Remove Ex-Employees trigger
       if (!haveExBtn) {
         const exTrigger = buildTriggerBtn(PANEL_IDS.triggerBtnId, "Remove Ex-Employees", () => {
           addDashboard.hide();
           exDashboard.toggle();
         });
         const addTrigger = document.getElementById(PANEL_IDS.addTriggerBtnId);
-        if (addTrigger) {
-          insertAfter(exTrigger, addTrigger);
-        } else {
-          try {
-            anchorParent.insertBefore(exTrigger, anchorEl);
-          } catch (_) {
-            anchorEl.parentElement?.insertBefore(exTrigger, anchorEl);
-          }
-        }
+        if (addTrigger) insertAfter(exTrigger, addTrigger);
+        else if (anchorParent) anchorParent.insertBefore(exTrigger, anchor);
+        else anchor.before(exTrigger);
         insertAfter(exDashboard.panel, exTrigger);
 
-        // Auto-scan on injection so ex-employee rows get marked even before
-        // the user opens the panel.
+        // Auto-scan on injection so ex-employee rows get marked immediately
         exDashboard.rescan().catch((e) => logError("Initial rescan failed:", e));
       }
     },
 
     rescan() {
-      if (this._dashboard) {
-        this._dashboard.rescan().catch((e) => logError("Manual rescan failed:", e));
-      }
+      if (this._dashboard) this._dashboard.rescan().catch((e) => logError("Manual rescan failed:", e));
     },
 
-    injectAllInlineUI() {
-      this.inject();
-    },
+    injectAllInlineUI() { this.inject(); },
   };
 
-  // ============================================================
-  // INITIALIZATION
-  // ============================================================
+  // ── App Controller ───────────────────────────────────────────
+  const _debug = {};
 
   const AppController = {
     mutationObserver: null,
@@ -1349,10 +809,10 @@
       this._waiting = true;
       try {
         for (let i = 0; i < TIMING.MAX_WAIT_ITERATIONS; i++) {
-          if (ButtonInjector.findAnchor()) {
-            ButtonInjector.inject();
-            return;
-          }
+          const found = PageDetector.isSystemGroupEdit
+            ? document.getElementById("systemGroupMembersChipList")
+            : document.querySelector('button[id^="removeMember_"]');
+          if (found) { ButtonInjector.inject(); return; }
           await sleep(TIMING.WAIT_ITERATION_DELAY_MS);
         }
       } finally {
@@ -1360,17 +820,11 @@
       }
     },
 
-    tick() {
-      this.waitForAnchor().catch((e) => logError("waitForAnchor:", e));
-    },
+    tick() { this.waitForAnchor().catch((e) => logError("waitForAnchor:", e)); },
 
-    handleMutations: debounce(function () {
-      ButtonInjector.injectAllInlineUI();
-    }, 300),
+    handleMutations: debounce(function () { ButtonInjector.injectAllInlineUI(); }, 300),
 
-    rescan() {
-      ButtonInjector.rescan();
-    },
+    rescan() { ButtonInjector.rescan(); },
 
     init() {
       if (!PageDetector.isSupported) return;
@@ -1384,17 +838,11 @@
         subtree: true,
       });
 
-      // Safety-net poll. The page replaces the chip-list / member-row subtree
-      // after manual adds/removes, which can outpace the debounced
-      // MutationObserver. inject() is idempotent (early-returns when both
-      // trigger buttons already exist), so polling is cheap and self-healing.
       this.reinjectIntervalId = setInterval(() => {
-        if (PageDetector.isSupported) {
-          ButtonInjector.injectAllInlineUI();
-        }
+        if (PageDetector.isSupported) ButtonInjector.injectAllInlineUI();
       }, TIMING.REINJECT_INTERVAL_MS);
 
-      Object.assign(debug, {
+      Object.assign(_debug, {
         ApiClient,
         ExEmployeeOperations,
         AddMemberOperations,
@@ -1402,33 +850,22 @@
         PageDetector,
         InlineDashboard,
       });
-      window.PatchExEmployees = { version: VERSION, _debug: debug };
+
+      window.PatchExEmployees = { version: VERSION, _debug };
       window.PatchExEmployeesDebug = {
-        enableDebug: () => { debug.DEBUGMODE = true; },
-        disableDebug: () => { debug.DEBUGMODE = false; },
-        injectButtons: () => {
-          ButtonInjector.injectAllInlineUI();
-          console.log("[PatchExEmployees] Manual UI injection triggered");
-        },
-        rescan: () => AppController.rescan(),
+        enableDebug:    () => { debug.DEBUGMODE = true; },
+        disableDebug:   () => { debug.DEBUGMODE = false; },
+        injectButtons:  () => { ButtonInjector.injectAllInlineUI(); console.log("[PatchExEmployees] Manual UI injection triggered"); },
+        rescan:         () => AppController.rescan(),
       };
 
       log("Loaded successfully");
     },
 
     cleanup() {
-      if (this.mutationObserver) {
-        this.mutationObserver.disconnect();
-        this.mutationObserver = null;
-      }
-      if (this.reinjectIntervalId) {
-        clearInterval(this.reinjectIntervalId);
-        this.reinjectIntervalId = null;
-      }
-      if (this.beforeUnloadHandler) {
-        window.removeEventListener("beforeunload", this.beforeUnloadHandler);
-        this.beforeUnloadHandler = null;
-      }
+      if (this.mutationObserver)    { this.mutationObserver.disconnect(); this.mutationObserver = null; }
+      if (this.reinjectIntervalId)  { clearInterval(this.reinjectIntervalId); this.reinjectIntervalId = null; }
+      if (this.beforeUnloadHandler) { window.removeEventListener("beforeunload", this.beforeUnloadHandler); this.beforeUnloadHandler = null; }
       log("Cleaned up");
     },
   };
@@ -1441,4 +878,5 @@
 
   AppController.beforeUnloadHandler = () => AppController.cleanup();
   window.addEventListener("beforeunload", AppController.beforeUnloadHandler);
+
 })();
