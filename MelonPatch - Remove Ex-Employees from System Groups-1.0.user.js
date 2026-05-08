@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MelonPatch - Remove Ex-Employees from System Groups
 // @namespace    http://tampermonkey.net/
-// @version      2.3.1
+// @version      2.4.0
 // @description  Highlights ex-employees on System Group & Teams Detail pages, plus inline panels to bulk-remove ex-employees and bulk-add active Melons.
 // @match        https://thepatch.melonlocal.com/SystemGroups/Edit*
 // @match        https://thepatch.melonlocal.com/Teams/Details*
@@ -14,7 +14,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "patch-ex-employees-v2.3.1";
+  const VERSION = "patch-ex-employees-v2.4.0";
   const DEBUG = false;
   const debug = { DEBUGMODE: DEBUG };
 
@@ -83,10 +83,29 @@
       const v = m[k];
       if (v && String(v).toLowerCase().includes(qLower)) return true;
     }
+    if (m.Title && String(m.Title).toLowerCase().includes(qLower)) return true;
+    if (m.MelonPatchRole && String(m.MelonPatchRole).toLowerCase().includes(qLower)) return true;
     if (m.FirstName && m.LastName) {
       if (`${m.FirstName} ${m.LastName}`.toLowerCase().includes(qLower)) return true;
     }
     return false;
+  }
+
+  function melonRole(m) {
+    return m?.MelonPatchRole ? String(m.MelonPatchRole).trim() : "";
+  }
+
+  function melonTitle(m) {
+    return m?.Title ? String(m.Title).trim() : "";
+  }
+
+  function melonSubtitle(m) {
+    const parts = [];
+    const t = melonTitle(m);
+    if (t) parts.push(t);
+    const r = melonRole(m);
+    if (r) parts.push(r);
+    return parts.join(" · ");
   }
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -158,9 +177,15 @@
       .patch-add-members-list-item{display:flex;align-items:center;gap:8px;padding:4px 6px;border-radius:3px;cursor:pointer;user-select:none}
       .patch-add-members-list-item:hover{background:${COLORS.alpine}}
       .patch-add-members-list-item input[type="checkbox"]{margin:0;cursor:pointer;accent-color:${COLORS.cactus}}
-      .patch-add-members-list-item-name{flex:1}
+      .patch-add-members-list-item-name{flex:1;display:flex;flex-direction:column;line-height:1.25}
+      .patch-add-members-list-item-name strong{font-weight:500}
+      .patch-add-members-list-item-subtitle{color:${COLORS.mustardSeed};font-size:11px;margin-top:1px}
       .patch-add-members-list-item-id{color:${COLORS.mustardSeed};font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px}
       .patch-add-members-list-empty{padding:8px;color:${COLORS.mustardSeed};font-style:italic}
+      .patch-add-members-filters{display:flex;gap:6px;margin-bottom:6px;flex-wrap:wrap}
+      .patch-add-members-filters .patch-add-members-search{flex:1;min-width:180px;margin-bottom:0}
+      .patch-add-members-role-select{padding:7px 8px;font-size:13px;border:1px solid ${COLORS.mojave};border-radius:4px;background:#fff;color:${COLORS.coconut};min-width:160px}
+      .patch-add-members-role-select:focus{outline:none;border-color:${COLORS.cactus};box-shadow:0 0 0 2px rgba(71,183,79,.15)}
     `;
     document.head.appendChild(s);
   }
@@ -560,7 +585,15 @@
     const search = document.createElement("input");
     search.type = "text";
     search.className = "patch-add-members-search";
-    search.placeholder = "Search by name, email, or MelonId...";
+    search.placeholder = "Search by name, email, title, role, or MelonId...";
+
+    const roleSelect = document.createElement("select");
+    roleSelect.className = "patch-add-members-role-select";
+    roleSelect.setAttribute("aria-label", "Filter by role");
+
+    const filtersRow = document.createElement("div");
+    filtersRow.className = "patch-add-members-filters";
+    filtersRow.append(search, roleSelect);
 
     const list = document.createElement("div");
     list.className = "patch-add-members-list";
@@ -574,7 +607,7 @@
     const selectVisibleBtn = InlineDashboard.makeButton("Select visible", "secondary");
     const addBtn           = InlineDashboard.makeButton("Add Selected", "primary");
     btnRow.append(cancelBtn, refreshBtn, clearBtn, selectVisibleBtn, addBtn);
-    panel.append(header, search, list, status, btnRow);
+    panel.append(header, filtersRow, list, status, btnRow);
 
     let allCandidates = [], filtered = [], selected = new Map(), loadState = "pending";
 
@@ -621,21 +654,73 @@
           if (cb.checked) selected.set(m.MelonId, m); else selected.delete(m.MelonId);
           renderStatus(); updateAddBtnState();
         });
-        const nameEl = document.createElement("span");
-        nameEl.className = "patch-add-members-list-item-name";
-        nameEl.textContent = melonDisplayName(m);
+        const nameWrap = document.createElement("span");
+        nameWrap.className = "patch-add-members-list-item-name";
+        const primary = document.createElement("strong");
+        primary.textContent = melonDisplayName(m);
+        nameWrap.appendChild(primary);
+        const subtitle = melonSubtitle(m);
+        if (subtitle) {
+          const sub = document.createElement("span");
+          sub.className = "patch-add-members-list-item-subtitle";
+          sub.textContent = subtitle;
+          nameWrap.appendChild(sub);
+        }
         const idEl = document.createElement("span");
         idEl.className = "patch-add-members-list-item-id";
         idEl.textContent = `#${m.MelonId}`;
-        row.append(cb, nameEl, idEl);
+        row.append(cb, nameWrap, idEl);
         frag.appendChild(row);
       }
       list.appendChild(frag);
     };
 
+    const populateRoleSelect = () => {
+      const previous = roleSelect.value;
+      const roles = new Set();
+      let sawBlank = false;
+      for (const m of allCandidates) {
+        const r = melonRole(m);
+        if (r) roles.add(r);
+        else sawBlank = true;
+      }
+      const sortedRoles = [...roles].sort((a, b) => a.localeCompare(b));
+      roleSelect.innerHTML = "";
+      const allOpt = document.createElement("option");
+      allOpt.value = "";
+      allOpt.textContent = `All roles (${allCandidates.length})`;
+      roleSelect.appendChild(allOpt);
+      for (const r of sortedRoles) {
+        const opt = document.createElement("option");
+        opt.value = r;
+        opt.textContent = r;
+        roleSelect.appendChild(opt);
+      }
+      if (sawBlank) {
+        const opt = document.createElement("option");
+        opt.value = "__none__";
+        opt.textContent = "(no role)";
+        roleSelect.appendChild(opt);
+      }
+      // Preserve prior selection if it's still valid; otherwise reset to All.
+      if (previous && [...roleSelect.options].some((o) => o.value === previous)) {
+        roleSelect.value = previous;
+      } else {
+        roleSelect.value = "";
+      }
+    };
+
     const applyFilter = () => {
       const q = (search.value || "").toLowerCase().trim();
-      filtered = q ? allCandidates.filter((m) => melonMatchesQuery(m, q)) : allCandidates.slice();
+      const role = roleSelect.value;
+      filtered = allCandidates.filter((m) => {
+        if (role === "__none__") {
+          if (melonRole(m)) return false;
+        } else if (role) {
+          if (melonRole(m) !== role) return false;
+        }
+        return melonMatchesQuery(m, q);
+      });
       renderList(); renderStatus();
     };
 
@@ -654,6 +739,7 @@
         loadState = "error";
       }
       InlineDashboard.setBusy(refreshBtn, false);
+      populateRoleSelect();
       applyFilter(); updateAddBtnState();
     };
 
@@ -667,6 +753,7 @@
       renderList(); renderStatus(); updateAddBtnState();
     });
     search.addEventListener("input", debounce(applyFilter, 100));
+    roleSelect.addEventListener("change", applyFilter);
 
     addBtn.addEventListener("click", async () => {
       if (addBtn.disabled) return;
@@ -674,6 +761,7 @@
       if (!picks.length || !confirm(`Add ${picks.length} member(s) to this group?`)) return;
       [cancelBtn, refreshBtn, clearBtn, selectVisibleBtn].forEach((b) => (b.disabled = true));
       search.disabled = true;
+      roleSelect.disabled = true;
       InlineDashboard.setBusy(addBtn, true, `(0/${picks.length}) Adding...`);
       const result = await AddMemberOperations.run(picks, TIMING.DEFAULT_DELAY_MS, {
         onProgress: ({ completed, total }) => { addBtn.textContent = `(${completed}/${total}) Adding...`; },
@@ -681,6 +769,7 @@
       InlineDashboard.setBusy(addBtn, false);
       [cancelBtn, refreshBtn, clearBtn, selectVisibleBtn].forEach((b) => (b.disabled = false));
       search.disabled = false;
+      roleSelect.disabled = false;
       status.classList.remove("is-info", "is-warn", "is-error");
       if (result.ok) {
         status.classList.add("is-info");
