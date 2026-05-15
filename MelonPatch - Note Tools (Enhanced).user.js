@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         MelonPatch - Note Tools (Enhanced)
 // @namespace    melonlocal
-// @version      2.14
-// @description  Adds Copy, Edit, Duplicate, Copy to Tasks, and Delete buttons on task notes. Fixes stale NumComments bubble counts including replies. Works in both grid and tree views.
+// @version      2.15
+// @description  Adds Copy, Edit, Duplicate, Copy to Tasks, and Delete buttons on task notes. Fixes stale NumComments bubble counts including replies and SignalR pushes. Works in both grid and tree views.
 // @match        https://thepatch.melonlocal.com/*
 // @grant        none
 // @run-at       document-start
@@ -13,6 +13,25 @@
 (function () {
 
   'use strict';
+
+  // ─── Shared constants + sync helper (used by XHR intercept AND push hook) ─
+  const COMMENT_SELECTOR = '.commentIdentifier';
+  let copyFeedbackTimer = null; // prevents button-text flicker on rapid copy clicks
+
+  function getSyncCommentCount(conversationId) {
+    try {
+      const syncXhr = new XMLHttpRequest();
+      syncXhr.open('GET', '/Comments/GetCommentsPartial?conversationId=' + conversationId + '&page=0', false);
+      syncXhr.send();
+      if (syncXhr.status === 200) {
+        const doc = new DOMParser().parseFromString(syncXhr.responseText, 'text/html');
+        return doc.querySelectorAll(COMMENT_SELECTOR).length;
+      }
+    } catch (e) {
+      console.error('[ML-Tools] sync fetch failed', e);
+    }
+    return null;
+  }
 
   // ─── Native XHR Intercept (synchronous, prototype-level) ─────────────────
   //
@@ -26,7 +45,6 @@
   (function installXHRIntercept() {
 
     const TASKS_DATA_RE = /\/Tasks\/\w+TasksData/;
-    const COMMENT_SELECTOR = '.commentIdentifier';
     const OrigAEL = XMLHttpRequest.prototype.addEventListener;
 
     XMLHttpRequest.prototype.addEventListener = function(type, fn, options) {
@@ -52,24 +70,11 @@
               let corrected = 0;
 
               toSync.forEach(task => {
-                try {
-                  const syncXhr = new XMLHttpRequest();
-                  syncXhr.open('GET',
-                    '/Comments/GetCommentsPartial?conversationId=' + task.ConversationId + '&page=0',
-                    false // synchronous
-                  );
-                  syncXhr.send();
-                  if (syncXhr.status === 200) {
-                    const doc = new DOMParser().parseFromString(syncXhr.responseText, 'text/html');
-                    const count = doc.querySelectorAll(COMMENT_SELECTOR).length;
-                    if (task.NumComments !== count) {
-                      console.log('[ML-Tools] task ' + task.TaskId + ': ' + task.NumComments + ' → ' + count);
-                      task.NumComments = count;
-                      corrected++;
-                    }
-                  }
-                } catch(e) {
-                  console.error('[ML-Tools] sync fetch failed for task ' + task.TaskId, e);
+                const count = getSyncCommentCount(task.ConversationId);
+                if (count !== null && task.NumComments !== count) {
+                  console.log('[ML-Tools] task ' + task.TaskId + ': ' + task.NumComments + ' → ' + count);
+                  task.NumComments = count;
+                  corrected++;
                 }
               });
 
@@ -253,8 +258,6 @@
   `;
 
   // ─── Helpers ──────────────────────────────────────────────────────────────
-  const COMMENT_SELECTOR = '.commentIdentifier';
-
   const getCsrfToken = () =>
     document.querySelector('input[name="__RequestVerificationToken"]')?.value || '';
 
@@ -265,7 +268,7 @@
     container.querySelector('.editor-contents.patchNote')?.innerHTML?.trim() || '';
 
   const getNoteTextPlain = (container) =>
-    container.querySelector('.editor-contents.patchNote')?.innerText?.trim() || '';
+    container.querySelector('.editor-contents.patchNote')?.textContent?.trim() || '';
 
   function showToast(message, ms = 2500) {
     const t = document.createElement('div');
@@ -324,6 +327,40 @@
     } catch(e) {
       console.error('[ML-Tools] syncTaskBubble failed for task', taskId, e);
     }
+  }
+
+  // ─── SignalR push hook (correct counts when Melon pushes updates) ────────
+  // Wraps dataSource.pushUpdate on both widgets so any incoming task data with
+  // NumComments > 0 gets reconciled against the real count from the server's
+  // comments-partial endpoint. Idempotent per dataSource via _mlPushHooked.
+  function installPushHook() {
+    if (typeof jQuery === 'undefined') return;
+    const widgets = [
+      jQuery('[data-role="treelist"]').data('kendoTreeList'),
+      jQuery('[data-role="grid"]').data('kendoGrid')
+    ].filter(Boolean);
+
+    widgets.forEach(widget => {
+      const ds = widget?.dataSource;
+      if (!ds || ds._mlPushHooked) return;
+      const origPushUpdate = ds.pushUpdate;
+      if (typeof origPushUpdate !== 'function') return;
+
+      ds.pushUpdate = function (items) {
+        const taskItems = Array.isArray(items) ? items : [items];
+        taskItems.forEach(item => {
+          if (item && item.ConversationId && item.NumComments > 0) {
+            const count = getSyncCommentCount(item.ConversationId);
+            if (count !== null && item.NumComments !== count) {
+              console.log('[ML-Tools] SyncFix (Push) task ' + (item.TaskId || '?') + ': ' + item.NumComments + ' → ' + count);
+              item.NumComments = count;
+            }
+          }
+        });
+        return origPushUpdate.apply(this, [items]);
+      };
+      ds._mlPushHooked = true;
+    });
   }
 
   // ─── API wrappers ─────────────────────────────────────────────────────────
@@ -392,7 +429,7 @@
       }));
   }
 
-  function waitForNoteEditor(timeoutMs = 3000) {
+  function waitForNoteEditor(timeoutMs = 8000) {
     return new Promise((resolve, reject) => {
       const check = () => {
         const frame = document.querySelector('#commentEditor iframe');
@@ -546,7 +583,25 @@
       triggerEl?.focus();
     };
 
-    const onKey = (e) => { if (e.key === 'Escape') close(); };
+    // Focus trap — keep Tab cycling inside the dialog
+    const focusables = () => Array.from(
+      overlay.querySelectorAll('button, input, [tabindex]:not([tabindex="-1"])')
+    ).filter(el => !el.disabled && el.offsetParent !== null);
+
+    const onKey = (e) => {
+      if (e.key === 'Escape') { close(); return; }
+      if (e.key === 'Tab') {
+        const els = focusables();
+        if (!els.length) return;
+        const first = els[0];
+        const last  = els[els.length - 1];
+        if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault(); last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault(); first.focus();
+        }
+      }
+    };
     document.addEventListener('keydown', onKey);
     document.getElementById('ml-modal-cancel').onclick = close;
     overlay.onclick = (e) => { if (e.target === overlay) close(); };
@@ -625,9 +680,14 @@
           'text/html':  new Blob([noteHtml],  { type: 'text/html'  }),
           'text/plain': new Blob([notePlain], { type: 'text/plain' })
         })]);
+        if (copyFeedbackTimer) clearTimeout(copyFeedbackTimer);
         copyBtn.textContent = '✓ Copied';
         copyBtn.classList.add('copied');
-        setTimeout(() => { copyBtn.textContent = '📋 Copy'; copyBtn.classList.remove('copied'); }, 2000);
+        copyFeedbackTimer = setTimeout(() => {
+          copyBtn.textContent = '📋 Copy';
+          copyBtn.classList.remove('copied');
+          copyFeedbackTimer = null;
+        }, 2000);
       } catch {
         try {
           await navigator.clipboard.writeText(notePlain);
@@ -660,6 +720,11 @@
       if (addBtn) addBtn.click();
       try {
         const doc = await waitForNoteEditor();
+        // Draft protection: don't blow away an existing draft without consent
+        if (doc.body.textContent.trim().length > 0 &&
+            !confirm('The editor already has content. Overwrite with the duplicated note?')) {
+          return;
+        }
         doc.body.innerHTML = noteHtml;
       } catch {
         showToast('Could not open the note editor');
@@ -738,6 +803,7 @@
 
     let pending = false;
     const scan = () => {
+      installPushHook(); // idempotent — only hooks each dataSource once
       document.querySelectorAll('.commentContainer.commentIdentifier').forEach(injectNoteButtons);
     };
 
