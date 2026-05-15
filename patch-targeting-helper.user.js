@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Patch Targeting Helper – Bulk Add + Bulk Remove (Targets) + Bulk Move (BudgetDetails ListBoxes)
 // @namespace    http://tampermonkey.net/
-// @version      3.4.0
+// @version      3.4.1
 // @description  Inline bulk Add/Remove for Edit Advertising Targets (County/City/Zip) + Bulk Move for Kendo ListBoxes on BudgetDetails screens. Validation counts, live progress, retried API calls. Optional zip coverage analysis vs. City/County/DMA/State.
 // @match        https://thepatch.melonlocal.com/*
 // @run-at       document-end
@@ -18,7 +18,7 @@
   // CONSTANTS
   // ============================================================
 
-  const VERSION = "patch-targeting-helper-bulk-v3.4.0";
+  const VERSION = "patch-targeting-helper-bulk-v3.4.1";
   const DEBUG = false;
 
   const ZIP_GEO = {
@@ -199,7 +199,7 @@
         color: ${COLORS.coconut};
         box-shadow: 0 1px 2px rgba(100, 68, 20, 0.08);
 
-        max-height: 1200px;
+        max-height: 5000px;
         opacity: 1;
         overflow: hidden;
         transition: max-height 0.3s ease-in-out, opacity 0.2s ease-out, margin 0.3s ease-in-out, padding 0.3s ease-in-out;
