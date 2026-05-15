@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         MelonPatch - Note Tools (Enhanced)
 // @namespace    melonlocal
-// @version      2.13
-// @description  Adds Copy (Rich), Edit Note, Copy to Tasks, and Delete buttons on task notes. Fixes stale NumComments bubble counts including replies. Works in both grid and tree views.
+// @version      2.14
+// @description  Adds Copy, Edit, Duplicate, Copy to Tasks, and Delete buttons on task notes. Fixes stale NumComments bubble counts including replies. Works in both grid and tree views.
 // @match        https://thepatch.melonlocal.com/*
 // @grant        none
 // @run-at       document-start
@@ -638,13 +638,24 @@
       }
     };
 
-    // ── Edit Note ──
-    const editNoteBtn = document.createElement('button');
-    editNoteBtn.className = 'ml-note-btn';
-    editNoteBtn.textContent = '✏️ Edit Note';
-    editNoteBtn.onclick = async () => {
-      const orig = editNoteBtn.textContent;
-      editNoteBtn.textContent = '⌛ Opening...';
+    // ── Edit (invoke Melon's native edit by clicking the note body) ──
+    const editBtn = document.createElement('button');
+    editBtn.className = 'ml-note-btn';
+    editBtn.textContent = '✏️ Edit';
+    editBtn.onclick = (e) => {
+      e.stopPropagation();
+      const noteBody = container.querySelector('.editor-contents.patchNote');
+      if (!noteBody) { showToast('Could not find note body to edit'); return; }
+      noteBody.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+    };
+
+    // ── Duplicate (open a new-note editor pre-filled with this note's HTML) ──
+    const duplicateBtn = document.createElement('button');
+    duplicateBtn.className = 'ml-note-btn';
+    duplicateBtn.textContent = '📝 Duplicate';
+    duplicateBtn.onclick = async () => {
+      const orig = duplicateBtn.textContent;
+      duplicateBtn.textContent = '⌛ Opening...';
       const addBtn = document.querySelector('.addNoteButton');
       if (addBtn) addBtn.click();
       try {
@@ -653,7 +664,7 @@
       } catch {
         showToast('Could not open the note editor');
       } finally {
-        editNoteBtn.textContent = orig;
+        duplicateBtn.textContent = orig;
       }
     };
 
@@ -715,7 +726,7 @@
       };
     };
 
-    btnGroup.append(copyBtn, editNoteBtn, copyToTasksBtn, deleteBtn);
+    btnGroup.append(copyBtn, editBtn, duplicateBtn, copyToTasksBtn, deleteBtn);
     actions.appendChild(btnGroup);
   }
 
