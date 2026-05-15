@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Yext Media Autofill
 // @namespace    melonlocal
-// @version      24.0
+// @version      24.1
 // @description  Generates unique SEO-focused Description, Details, and Alt Text for each Yext media item via Claude or Gemini vision APIs.
 // @match        https://www.yext.com/s/*/entity/edit3*
 // @run-at       document-idle
@@ -12,7 +12,9 @@
 // @connect      localhost
 // @connect      generativelanguage.googleapis.com
 // @connect      api.anthropic.com
-// @connect      *
+// @connect      mktgcdn.com
+// @connect      yextcdn.com
+// @connect      mktgcms.com
 // @updateURL    https://raw.githubusercontent.com/mikemelonlocal/melon-userscripts/main/yext-media-autofill.user.js
 // @downloadURL  https://raw.githubusercontent.com/mikemelonlocal/melon-userscripts/main/yext-media-autofill.user.js
 // ==/UserScript==
@@ -29,9 +31,11 @@
     // API keys must be set via the browser console:
     //   GM_setValue("geminiApiKey", "<your-key>")
     //   GM_setValue("anthropicApiKey", "<your-key>")
+    //   GM_setValue("localCaptionToken", "<shared-secret>")  // optional, see callLocalCaption
     // No embedded fallbacks — keys committed in source are leaks.
     getGeminiApiKey: () => GM_getValue("geminiApiKey", ""),
     getAnthropicApiKey: () => GM_getValue("anthropicApiKey", ""),
+    getLocalCaptionToken: () => GM_getValue("localCaptionToken", ""),
 
     // Provider selection:
     //   "claude"  — Claude for all fields
@@ -410,12 +414,21 @@
     return text.trim();
   }
 
+  // The local caption endpoint is plain HTTP on 127.0.0.1; any process binding
+  // that port could read image bytes posted here. Set a shared secret via
+  //   GM_setValue("localCaptionToken", "<random-string>")
+  // and require the same token in your caption server to gate access. Empty
+  // token = header omitted (back-compat for users with no local server).
   async function callLocalCaption(imageDataUrl) {
     if (!imageDataUrl) throw new Error("No image data URL provided");
 
+    const headers = { "Content-Type": "application/json" };
+    const token = CONFIG.getLocalCaptionToken();
+    if (token) headers["X-Auth-Token"] = token;
+
     const resp = await fetchWithRetry(CONFIG.localCaptionUrl, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify({ image: imageDataUrl })
     });
 
@@ -516,11 +529,18 @@
   // SYSTEM_PROMPT (cacheable on Claude); the user prompt only carries the
   // dynamic details that change per item.
   function buildUserPrompt({ field, identity, seed = "", extras = {} }) {
+    // Scrub PII (email, phone, ZIP, street address, PO Box) from anything that
+    // leaves the browser bound for a third-party LLM. enforceFieldSpec already
+    // scrubs output; this mirrors it on the input side.
+    const safeIdentity = identity ? scrubPII(identity) : "";
+    const safeSeed = seed ? scrubPII(seed) : "";
+    const safeLocation = extras.location ? scrubPII(extras.location) : "";
+
     const parts = [];
     parts.push(`Field: ${field}`);
-    parts.push(`Identity: ${identity || "(none provided)"}`);
-    if (extras.location) parts.push(`Location: ${extras.location}`);
-    if (seed) parts.push(`Existing caption (strip promotional language, preserve factual subjects/places/events): "${seed}"`);
+    parts.push(`Identity: ${safeIdentity || "(none provided)"}`);
+    if (safeLocation) parts.push(`Location: ${safeLocation}`);
+    if (safeSeed) parts.push(`Existing caption (strip promotional language, preserve factual subjects/places/events): "${safeSeed}"`);
 
     if (field === "description") {
       parts.push("Task: Write a factual description of what's specifically in this photo (5 to 249 chars).");
