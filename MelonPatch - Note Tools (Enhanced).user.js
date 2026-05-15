@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MelonPatch - Note Tools (Enhanced)
 // @namespace    melonlocal
-// @version      2.16
+// @version      2.17
 // @description  Adds Copy, Edit, Duplicate, Copy to Tasks, Delete, and saved Note Templates. Fixes stale NumComments bubble counts including replies and SignalR pushes. Works in both grid and tree views.
 // @match        https://thepatch.melonlocal.com/*
 // @grant        none
@@ -388,6 +388,23 @@
         || jQuery('[data-role="grid"]').data('kendoGrid');
   }
 
+  // Iterate EVERY kendo grid/treelist on the page (the Agent Dashboard has
+  // multiple — Open Tasks, Closed Tasks, etc. — and jQuery('[data-role=...]).data()
+  // only returns data from the first match). Returns [] if none initialized.
+  function getAllWidgets() {
+    if (typeof jQuery === 'undefined') return [];
+    const widgets = [];
+    jQuery('[data-role="grid"]').each(function () {
+      const w = jQuery(this).data('kendoGrid');
+      if (w) widgets.push(w);
+    });
+    jQuery('[data-role="treelist"]').each(function () {
+      const w = jQuery(this).data('kendoTreeList');
+      if (w) widgets.push(w);
+    });
+    return widgets;
+  }
+
   async function runPool(items, limit, worker) {
     let idx = 0;
     const runners = Array.from({ length: Math.min(limit, items.length) }, async () => {
@@ -409,15 +426,8 @@
     if (!conversationId || !taskId) return;
     try {
       const trueCount = await fetchTrueCount(conversationId);
-      if (typeof jQuery === 'undefined') return;
-
-      // Try both widgets — task may live in either grid or treelist (or both)
-      const widgets = [
-        jQuery('[data-role="treelist"]').data('kendoTreeList'),
-        jQuery('[data-role="grid"]').data('kendoGrid')
-      ].filter(Boolean);
-
-      for (const widget of widgets) {
+      // Update the task wherever it lives — multiple grids/treelists may be mounted
+      for (const widget of getAllWidgets()) {
         const item = Array.from(widget.dataSource.data())
           .find(d => String(d.TaskId) === String(taskId));
         if (!item) continue;
@@ -438,13 +448,7 @@
   // NumComments > 0 gets reconciled against the real count from the server's
   // comments-partial endpoint. Idempotent per dataSource via _mlPushHooked.
   function installPushHook() {
-    if (typeof jQuery === 'undefined') return;
-    const widgets = [
-      jQuery('[data-role="treelist"]').data('kendoTreeList'),
-      jQuery('[data-role="grid"]').data('kendoGrid')
-    ].filter(Boolean);
-
-    widgets.forEach(widget => {
+    getAllWidgets().forEach(widget => {
       const ds = widget?.dataSource;
       if (!ds || ds._mlPushHooked) return;
       const origPushUpdate = ds.pushUpdate;
@@ -504,16 +508,11 @@
   }
 
   function getAllTasks() {
-    if (typeof jQuery === 'undefined') return [];
-    const grid     = jQuery('[data-role="grid"]').data('kendoGrid');
-    const treelist = jQuery('[data-role="treelist"]').data('kendoTreeList');
+    const widgets = getAllWidgets();
+    if (!widgets.length) return [];
 
-    // Both widgets may be mounted simultaneously (one per view); read from any
-    // that has data and dedupe by TaskId. Previously we hard-preferred treelist,
-    // which returned [] in grid view because the hidden treelist was empty.
     const rows = [];
-    if (treelist) rows.push(...Array.from(treelist.dataSource.data()));
-    if (grid)     rows.push(...Array.from(grid.dataSource.data()));
+    widgets.forEach(w => { rows.push(...Array.from(w.dataSource.data())); });
     if (!rows.length) return [];
 
     const seen = new Set();
