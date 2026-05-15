@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Patch Targeting Helper – Bulk Add + Bulk Remove (Targets) + Bulk Move (BudgetDetails ListBoxes)
 // @namespace    http://tampermonkey.net/
-// @version      3.4.1
+// @version      3.4.2
 // @description  Inline bulk Add/Remove for Edit Advertising Targets (County/City/Zip) + Bulk Move for Kendo ListBoxes on BudgetDetails screens. Validation counts, live progress, retried API calls. Optional zip coverage analysis vs. City/County/DMA/State.
 // @match        https://thepatch.melonlocal.com/*
 // @run-at       document-end
@@ -18,7 +18,7 @@
   // CONSTANTS
   // ============================================================
 
-  const VERSION = "patch-targeting-helper-bulk-v3.4.1";
+  const VERSION = "patch-targeting-helper-bulk-v3.4.2";
   const DEBUG = false;
 
   const ZIP_GEO = {
@@ -268,8 +268,14 @@
       .patch-coverage-results {
         margin-top: 8px; background: #fff; border: 1px solid ${COLORS.mojave};
         border-radius: 6px; padding: 8px 10px; font-size: 12px; color: ${COLORS.coconut};
+        max-height: 360px; overflow-y: auto;
+        overscroll-behavior: contain;
       }
       .patch-coverage-results[hidden] { display: none !important; }
+      .patch-coverage-results::-webkit-scrollbar { width: 8px; }
+      .patch-coverage-results::-webkit-scrollbar-thumb { background: ${COLORS.mojave}; border-radius: 4px; }
+      .patch-coverage-results::-webkit-scrollbar-thumb:hover { background: ${COLORS.coconut}; }
+      .patch-coverage-results::-webkit-scrollbar-track { background: transparent; }
       .patch-coverage-header { font-size: 12px; margin-bottom: 6px; color: ${COLORS.coconut}; }
       .patch-coverage-subtle { color: ${COLORS.mojave}; font-weight: normal; }
       .patch-coverage-empty, .patch-coverage-loading, .patch-coverage-error { font-style: italic; color: ${COLORS.mojave}; padding: 4px 0; }
