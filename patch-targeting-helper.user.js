@@ -1,11 +1,12 @@
 // ==UserScript==
 // @name         Patch Targeting Helper – Bulk Add + Bulk Remove (Targets) + Bulk Move (BudgetDetails ListBoxes)
 // @namespace    http://tampermonkey.net/
-// @version      3.2.0
-// @description  Inline bulk Add/Remove for Edit Advertising Targets (County/City/Zip) + Bulk Move for Kendo ListBoxes on BudgetDetails screens. Validation counts, live progress, retried API calls.
+// @version      3.3.0
+// @description  Inline bulk Add/Remove for Edit Advertising Targets (County/City/Zip) + Bulk Move for Kendo ListBoxes on BudgetDetails screens. Validation counts, live progress, retried API calls. Optional zip coverage analysis vs. City/County/DMA/State.
 // @match        https://thepatch.melonlocal.com/*
 // @run-at       document-end
 // @grant        none
+// @connect      raw.githubusercontent.com
 // @updateURL    https://raw.githubusercontent.com/mikemelonlocal/melon-userscripts/main/patch-targeting-helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/mikemelonlocal/melon-userscripts/main/patch-targeting-helper.user.js
 // ==/UserScript==
@@ -18,8 +19,19 @@
   // ============================================================
 
   // Keep in sync with @version in the userscript header above.
-  const VERSION = "patch-targeting-helper-bulk-v3.2.0";
+  const VERSION = "patch-targeting-helper-bulk-v3.3.0";
   const DEBUG = false;
+
+  // Coverage analysis: bump EXPECTED when the JSON schema or data
+  // changes meaningfully, so cached copies are invalidated.
+  const ZIP_GEO = {
+    URL: "https://raw.githubusercontent.com/mikemelonlocal/melon-userscripts/main/zip-geo-mapping.json",
+    EXPECTED_VERSION: "1",
+    CACHE_KEY: "patch-helper:zip-geo-mapping:v1",
+    TOGGLE_KEY: "patch-helper:coverage-toggle",
+    THRESHOLD: 0.5, // groups with >= 50% selected are shown
+    MISSING_PREVIEW_MAX: 30,
+  };
 
   const _debug = { DEBUG_MODE: DEBUG };
 
@@ -253,6 +265,92 @@
       .patch-inline-btn--secondary { background: ${COLORS.sand};           color: ${COLORS.coconut}; }
       .patch-inline-btn--danger    { background: ${COLORS.watermelonSugar}; color: #fff; }
       .patch-inline-btn--busy      { background: ${COLORS.mustardSeed} !important; color: #fff !important; }
+
+      .patch-coverage-toggle {
+        display: flex; align-items: center; gap: 8px;
+        margin-top: 10px;
+        font-size: 13px; color: ${COLORS.coconut};
+        cursor: pointer; user-select: none;
+      }
+      .patch-coverage-toggle input { cursor: pointer; }
+      .patch-coverage-results {
+        margin-top: 8px;
+        background: #fff;
+        border: 1px solid ${COLORS.mojave};
+        border-radius: 6px;
+        padding: 8px 10px;
+        font-size: 12px;
+        color: ${COLORS.coconut};
+      }
+      .patch-coverage-results[hidden] { display: none !important; }
+      .patch-coverage-header {
+        font-size: 12px; margin-bottom: 6px; color: ${COLORS.coconut};
+      }
+      .patch-coverage-subtle { color: ${COLORS.mojave}; font-weight: normal; }
+      .patch-coverage-empty, .patch-coverage-loading, .patch-coverage-error {
+        font-style: italic; color: ${COLORS.mojave}; padding: 4px 0;
+      }
+      .patch-coverage-error { color: ${COLORS.cranberry}; font-style: normal; }
+      .patch-coverage-list { list-style: none; padding: 0; margin: 0; }
+      .patch-coverage-row {
+        border-top: 1px solid ${COLORS.alpine};
+        padding: 6px 0;
+      }
+      .patch-coverage-row:first-child { border-top: none; }
+      .patch-coverage-row-head {
+        display: grid;
+        grid-template-columns: 64px 1fr auto auto;
+        gap: 8px;
+        align-items: baseline;
+      }
+      .patch-coverage-type {
+        font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px;
+        font-weight: 700; color: #fff;
+        background: ${COLORS.pine};
+        padding: 2px 6px; border-radius: 3px;
+        text-align: center;
+      }
+      .patch-coverage-type[data-type="City"]   { background: ${COLORS.cactus}; }
+      .patch-coverage-type[data-type="County"] { background: ${COLORS.mustardSeed}; }
+      .patch-coverage-type[data-type="DMA"]    { background: ${COLORS.pine}; }
+      .patch-coverage-type[data-type="State"]  { background: ${COLORS.coconut}; }
+      .patch-coverage-label { font-weight: 600; }
+      .patch-coverage-pct {
+        font-weight: 700; color: ${COLORS.pine};
+        font-variant-numeric: tabular-nums;
+      }
+      .patch-coverage-count {
+        font-size: 11px; color: ${COLORS.mojave};
+        font-variant-numeric: tabular-nums;
+      }
+      .patch-coverage-missing {
+        margin-top: 4px; padding-left: 72px;
+      }
+      .patch-coverage-missing summary {
+        cursor: pointer; font-size: 11px; color: ${COLORS.coconut};
+      }
+      .patch-coverage-missing-list {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 11px;
+        padding: 4px 0;
+        word-break: break-word;
+        color: ${COLORS.coconut};
+      }
+      .patch-coverage-copy {
+        font-size: 11px; padding: 3px 8px;
+        border: 1px solid ${COLORS.mojave}; background: ${COLORS.sand};
+        color: ${COLORS.coconut};
+        border-radius: 3px; cursor: pointer;
+      }
+      .patch-coverage-copy:hover { background: ${COLORS.alpine}; }
+      .patch-coverage-complete {
+        padding-left: 72px; font-size: 11px;
+        color: ${COLORS.cactus}; font-weight: 600;
+      }
+      .patch-coverage-warn-invalid {
+        margin-top: 4px; font-size: 11px;
+        color: ${COLORS.mustardSeed};
+      }
     `;
     document.head.appendChild(styleTag);
   }
@@ -803,6 +901,192 @@
   };
 
   // ============================================================
+  // ZIP GEO DATA — lazy-loaded, cached zip → {state, city, county, DMA} map
+  // ============================================================
+  // Backing data is generated from ZIP_to_DMA_Mapping.xlsx by
+  // scripts/build-zip-geo-mapping.py and committed to the repo as
+  // zip-geo-mapping.json. The userscript fetches it on first use and caches
+  // the parsed result in localStorage keyed by EXPECTED_VERSION so cached
+  // copies invalidate when the schema changes.
+
+  const ZipGeoData = {
+    _data: null,
+    _loading: null,
+    _inverse: null,
+
+    isLoaded() { return !!this._data; },
+
+    async load() {
+      if (this._data) return this._data;
+      if (this._loading) return this._loading;
+      this._loading = (async () => {
+        const cached = this._readCache();
+        if (cached) {
+          log("ZipGeoData: loaded from cache", cached.stats);
+          this._data = cached;
+          return cached;
+        }
+        log("ZipGeoData: fetching", ZIP_GEO.URL);
+        const res = await fetch(ZIP_GEO.URL, { credentials: "omit", cache: "force-cache" });
+        if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+        const text = await res.text();
+        const data = JSON.parse(text);
+        if (!data?.zips || data?.v !== ZIP_GEO.EXPECTED_VERSION) {
+          throw new Error(`Unexpected mapping shape or version: v=${data?.v}`);
+        }
+        try { localStorage.setItem(ZIP_GEO.CACHE_KEY, text); }
+        catch (e) { logError("ZipGeoData: cache write failed (quota?)", e?.message || e); }
+        this._data = data;
+        return data;
+      })();
+      try { return await this._loading; }
+      finally { this._loading = null; }
+    },
+
+    _readCache() {
+      try {
+        const raw = localStorage.getItem(ZIP_GEO.CACHE_KEY);
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        if (parsed?.v !== ZIP_GEO.EXPECTED_VERSION) return null;
+        return parsed;
+      } catch (e) {
+        logError("ZipGeoData: cache read failed", e?.message || e);
+        return null;
+      }
+    },
+
+    clearCache() {
+      try { localStorage.removeItem(ZIP_GEO.CACHE_KEY); } catch {}
+      this._data = null;
+      this._inverse = null;
+    },
+
+    zipInfo(zip) {
+      if (!this._data) return null;
+      const t = this._data.zips[zip];
+      if (!t) return null;
+      const [state, cityIdx, countyIdx, dmaCode] = t;
+      return {
+        state,
+        city: this._data.cities[cityIdx],
+        county: this._data.counties[countyIdx],
+        dmaCode,
+        dmaName: this._data.dmas[dmaCode] || dmaCode,
+      };
+    },
+
+    /**
+     * Build reverse indexes (group → Set of all zips in group) lazily. The
+     * forward map has ~42k entries, so this is a single ~10ms walk and
+     * memoized for the page lifetime.
+     */
+    inverse() {
+      if (this._inverse) return this._inverse;
+      if (!this._data) throw new Error("ZipGeoData not loaded");
+      const cityToZips = new Map();
+      const countyToZips = new Map();
+      const stateToZips = new Map();
+      const dmaToZips = new Map();
+      const cities = this._data.cities;
+      const counties = this._data.counties;
+      for (const zip in this._data.zips) {
+        const [state, cityIdx, countyIdx, dmaCode] = this._data.zips[zip];
+        const cityKey = `${cities[cityIdx]}, ${state}`;
+        const countyKey = `${counties[countyIdx]}, ${state}`;
+        let set;
+        set = cityToZips.get(cityKey);   if (!set) cityToZips.set(cityKey, set = new Set());   set.add(zip);
+        set = countyToZips.get(countyKey); if (!set) countyToZips.set(countyKey, set = new Set()); set.add(zip);
+        set = stateToZips.get(state);    if (!set) stateToZips.set(state, set = new Set());    set.add(zip);
+        set = dmaToZips.get(dmaCode);    if (!set) dmaToZips.set(dmaCode, set = new Set());    set.add(zip);
+      }
+      this._inverse = { cityToZips, countyToZips, stateToZips, dmaToZips };
+      return this._inverse;
+    },
+  };
+
+  // ============================================================
+  // COVERAGE ANALYZER
+  // ============================================================
+  // Given a list of selected zips, return groups (City/County/DMA/State)
+  // where the selection covers at least THRESHOLD of the group's zips,
+  // sorted by coverage desc. Used by the optional zip coverage UI.
+
+  const CoverageAnalyzer = {
+    /**
+     * @param {string[]} selectedZips
+     * @returns {{
+     *   total:number, recognized:number, unrecognized:string[],
+     *   results: Array<{type:string,label:string,key:string,percent:number,selectedCount:number,totalCount:number,missing:string[]}>
+     * }}
+     */
+    analyze(selectedZips) {
+      const data = ZipGeoData._data;
+      if (!data) return { total: 0, recognized: 0, unrecognized: [], results: [] };
+
+      const selectedSet = new Set();
+      const unrecognized = [];
+      for (const z of selectedZips) {
+        if (data.zips[z]) selectedSet.add(z);
+        else unrecognized.push(z);
+      }
+      if (!selectedSet.size) {
+        return { total: selectedZips.length, recognized: 0, unrecognized, results: [] };
+      }
+
+      const inv = ZipGeoData.inverse();
+      const cityHits = new Map();
+      const countyHits = new Map();
+      const stateHits = new Map();
+      const dmaHits = new Map();
+
+      for (const zip of selectedSet) {
+        const info = ZipGeoData.zipInfo(zip);
+        if (!info) continue;
+        const cityKey = `${info.city}, ${info.state}`;
+        const countyKey = `${info.county}, ${info.state}`;
+        cityHits.set(cityKey, (cityHits.get(cityKey) || 0) + 1);
+        countyHits.set(countyKey, (countyHits.get(countyKey) || 0) + 1);
+        stateHits.set(info.state, (stateHits.get(info.state) || 0) + 1);
+        dmaHits.set(info.dmaCode, (dmaHits.get(info.dmaCode) || 0) + 1);
+      }
+
+      const results = [];
+      const collect = (type, hits, indexMap, labelFn) => {
+        for (const [key, selectedCount] of hits) {
+          const fullSet = indexMap.get(key);
+          if (!fullSet) continue;
+          const total = fullSet.size;
+          const percent = selectedCount / total;
+          if (percent < ZIP_GEO.THRESHOLD) continue;
+          const missing = [];
+          for (const z of fullSet) if (!selectedSet.has(z)) missing.push(z);
+          missing.sort();
+          results.push({ type, key, label: labelFn(key), percent, selectedCount, totalCount: total, missing });
+        }
+      };
+
+      collect("City",   cityHits,   inv.cityToZips,   (k) => k);
+      collect("County", countyHits, inv.countyToZips, (k) => k);
+      collect("DMA",    dmaHits,    inv.dmaToZips,    (code) => `${data.dmas[code] || code} (${code})`);
+      collect("State",  stateHits,  inv.stateToZips,  (k) => k);
+
+      results.sort((a, b) =>
+        b.percent - a.percent ||
+        b.totalCount - a.totalCount ||
+        a.label.localeCompare(b.label)
+      );
+
+      return {
+        total: selectedZips.length,
+        recognized: selectedSet.size,
+        unrecognized,
+        results,
+      };
+    },
+  };
+
+  // ============================================================
   // INLINE DASHBOARD — replaces ModalBuilder + FocusManager
   // ============================================================
 
@@ -968,6 +1252,166 @@
   // INLINE ACTION RUNNERS — wire operations to inline panel UI
   // ============================================================
 
+  function escapeHtml(s) {
+    return String(s ?? "").replace(/[&<>"']/g, (c) => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+    })[c]);
+  }
+
+  /**
+   * Attach the "Show coverage analysis" toggle + result panel to a Bulk Add
+   * Zip dashboard. Wires the textarea so analysis updates live (debounced),
+   * and remembers the toggle state in localStorage.
+   */
+  function attachCoverageAnalysis(dashboard) {
+    const panel = dashboard.panel;
+    const textarea = dashboard.textarea;
+
+    const toggleLabel = document.createElement("label");
+    toggleLabel.className = "patch-coverage-toggle";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = localStorage.getItem(ZIP_GEO.TOGGLE_KEY) === "1";
+    const labelSpan = document.createElement("span");
+    labelSpan.textContent = "Show coverage analysis (City / County / DMA / State)";
+    toggleLabel.appendChild(checkbox);
+    toggleLabel.appendChild(labelSpan);
+
+    const results = document.createElement("div");
+    results.className = "patch-coverage-results";
+    results.hidden = !checkbox.checked;
+
+    const btnRow = panel.querySelector(`.${PANEL_IDS.inlinePanelClass}-button-row`);
+    panel.insertBefore(toggleLabel, btnRow);
+    panel.insertBefore(results, btnRow);
+
+    const render = async () => {
+      if (!checkbox.checked) { results.hidden = true; return; }
+      results.hidden = false;
+
+      if (!ZipGeoData.isLoaded()) {
+        results.innerHTML = `<div class="patch-coverage-loading">Loading zip → geo data…</div>`;
+        try { await ZipGeoData.load(); }
+        catch (e) {
+          results.innerHTML = `<div class="patch-coverage-error">Failed to load geo data: ${escapeHtml(e?.message || e)}</div>`;
+          return;
+        }
+      }
+
+      const existing = BulkRemoveOperations.collectChipTargetNames("zip");
+      const pasted = parseZips(textarea.value || "");
+      const merged = Array.from(new Set([...existing, ...pasted]));
+
+      if (!merged.length) {
+        results.innerHTML = `<div class="patch-coverage-empty">Paste zip codes (or have some already targeted) to see coverage.</div>`;
+        return;
+      }
+
+      const analysis = CoverageAnalyzer.analyze(merged);
+      renderCoverageResults(results, analysis, {
+        existingCount: existing.length,
+        pastedCount: pasted.length,
+        mergedCount: merged.length,
+      });
+    };
+
+    const debouncedRender = debounce(render, 250);
+    textarea.addEventListener("input", debouncedRender);
+    checkbox.addEventListener("change", () => {
+      try { localStorage.setItem(ZIP_GEO.TOGGLE_KEY, checkbox.checked ? "1" : "0"); } catch {}
+      render();
+    });
+
+    // Re-render whenever the panel is shown so existing chips drive an
+    // initial view even before the user pastes anything.
+    const origShow = dashboard.show.bind(dashboard);
+    dashboard.show = function () {
+      origShow();
+      render();
+    };
+
+    // After an Add action finishes the page has new chips, so coverage is
+    // stale. The action button toggles to disabled while running and back
+    // when done — wait for that transition, then re-render.
+    for (const actionBtn of dashboard.actionButtons) {
+      actionBtn.addEventListener("click", () => {
+        if (!checkbox.checked) return;
+        let sawDisabled = false;
+        const tick = () => {
+          if (!checkbox.checked || panel.hidden) return;
+          if (actionBtn.disabled) { sawDisabled = true; setTimeout(tick, 200); return; }
+          if (sawDisabled) { render(); return; }
+          setTimeout(tick, 75);
+        };
+        setTimeout(tick, 50);
+      });
+    }
+  }
+
+  function renderCoverageResults(box, analysis, counts) {
+    const { results, recognized, unrecognized } = analysis;
+    const header = `
+      <div class="patch-coverage-header">
+        Coverage of <strong>${counts.mergedCount}</strong> unique zip${counts.mergedCount === 1 ? "" : "s"}
+        <span class="patch-coverage-subtle">
+          (${counts.existingCount} on page${counts.pastedCount ? ` + ${counts.pastedCount} pasted` : ""}${recognized !== counts.mergedCount ? `, ${recognized} recognized` : ""})
+        </span>
+      </div>`;
+
+    const warn = unrecognized.length
+      ? `<div class="patch-coverage-warn-invalid">${unrecognized.length} zip${unrecognized.length === 1 ? " is" : "s are"} not in the mapping and were excluded from coverage.</div>`
+      : "";
+
+    if (!results.length) {
+      box.innerHTML = header + warn + `<div class="patch-coverage-empty">No group is at least ${Math.round(ZIP_GEO.THRESHOLD * 100)}% covered yet.</div>`;
+      return;
+    }
+
+    const rows = results.map((r) => {
+      const pct = Math.round(r.percent * 100);
+      const previewZips = r.missing.slice(0, ZIP_GEO.MISSING_PREVIEW_MAX).join(", ");
+      const more = r.missing.length > ZIP_GEO.MISSING_PREVIEW_MAX
+        ? `  …+${r.missing.length - ZIP_GEO.MISSING_PREVIEW_MAX} more`
+        : "";
+      const allZips = r.missing.join(",");
+      const missingBlock = r.missing.length
+        ? `<details class="patch-coverage-missing">
+             <summary>${r.missing.length} missing zip${r.missing.length === 1 ? "" : "s"}</summary>
+             <div class="patch-coverage-missing-list">${escapeHtml(previewZips)}${escapeHtml(more)}</div>
+             <button type="button" class="patch-coverage-copy" data-zips="${escapeHtml(allZips)}">Copy missing zips</button>
+           </details>`
+        : `<div class="patch-coverage-complete">✓ Complete — every zip in this group is selected</div>`;
+      return `
+        <li class="patch-coverage-row">
+          <div class="patch-coverage-row-head">
+            <span class="patch-coverage-type" data-type="${escapeHtml(r.type)}">${escapeHtml(r.type)}</span>
+            <span class="patch-coverage-label">${escapeHtml(r.label)}</span>
+            <span class="patch-coverage-pct">${pct}%</span>
+            <span class="patch-coverage-count">${r.selectedCount}/${r.totalCount}</span>
+          </div>
+          ${missingBlock}
+        </li>`;
+    }).join("");
+
+    box.innerHTML = header + warn + `<ul class="patch-coverage-list">${rows}</ul>`;
+
+    box.querySelectorAll(".patch-coverage-copy").forEach((btn) => {
+      btn.addEventListener("click", async (e) => {
+        e.preventDefault();
+        const zips = btn.dataset.zips || "";
+        try {
+          await navigator.clipboard.writeText(zips.replace(/,/g, "\n"));
+          const orig = btn.textContent;
+          btn.textContent = "✓ Copied";
+          setTimeout(() => { btn.textContent = orig; }, 1500);
+        } catch (err) {
+          logError("Clipboard write failed", err);
+          btn.textContent = "Copy failed";
+        }
+      });
+    });
+  }
+
   function buildAddPanel(typeKey, pretty) {
     const dashboard = InlineDashboard.create({
       id: `patch-bulk-add-${typeKey}`,
@@ -1019,6 +1463,7 @@
         }
       },
     });
+    if (typeKey === "zip") attachCoverageAnalysis(dashboard);
     return dashboard;
   }
 
@@ -1431,6 +1876,8 @@
         PageDetector,
         ApiClient,
         InlineDashboard,
+        ZipGeoData,
+        CoverageAnalyzer,
       });
       window.PatchTargetingHelper = { version: VERSION, _debug };
 
