@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         MelonPatch - Note Tools (Enhanced)
 // @namespace    melonlocal
-// @version      2.15
-// @description  Adds Copy, Edit, Duplicate, Copy to Tasks, and Delete buttons on task notes. Fixes stale NumComments bubble counts including replies and SignalR pushes. Works in both grid and tree views.
+// @version      2.16
+// @description  Adds Copy, Edit, Duplicate, Copy to Tasks, Delete, and saved Note Templates. Fixes stale NumComments bubble counts including replies and SignalR pushes. Works in both grid and tree views.
 // @match        https://thepatch.melonlocal.com/*
 // @grant        none
 // @run-at       document-start
@@ -255,6 +255,62 @@
       from { opacity: 0; transform: translate(-50%, 10px); }
       to   { opacity: 1; transform: translate(-50%, 0); }
     }
+
+    /* Template buttons next to the native Add Note button */
+    .ml-tpl-actions-wrap { display: inline-flex; gap: 6px; margin-left: 8px; vertical-align: middle; }
+
+    /* Template picker modal */
+    #ml-tpl-modal-overlay {
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,0.5);
+      backdrop-filter: blur(2px);
+      z-index: 99999;
+      display: flex; align-items: center; justify-content: center;
+    }
+    #ml-tpl-modal {
+      background: #fff; border-radius: 12px; padding: 24px;
+      width: min(560px, 92vw); max-height: 85vh;
+      display: flex; flex-direction: column;
+      box-shadow: 0 20px 25px -5px rgba(0,0,0,0.1), 0 10px 10px -5px rgba(0,0,0,0.04);
+      font-family: system-ui, -apple-system, sans-serif;
+    }
+    #ml-tpl-modal h3 { margin: 0 0 12px 0; font-size: 16px; font-weight: 700; color: #111827; }
+    #ml-tpl-search {
+      width: 100%; padding: 8px 12px; margin-bottom: 12px;
+      border: 1px solid #d1d5db; border-radius: 6px;
+      font-size: 14px; outline: none; box-sizing: border-box;
+    }
+    #ml-tpl-search:focus { border-color: #2563eb; box-shadow: 0 0 0 3px rgba(191,219,254,0.6); }
+    .ml-tpl-list {
+      flex: 1; overflow-y: auto;
+      border: 1px solid #e5e7eb; border-radius: 6px; margin-bottom: 16px;
+    }
+    .ml-tpl-row {
+      display: flex; align-items: center; gap: 12px;
+      padding: 10px 12px; border-bottom: 1px solid #f3f4f6;
+      cursor: pointer; transition: background 0.1s;
+    }
+    .ml-tpl-row:last-child { border-bottom: none; }
+    .ml-tpl-row:hover { background: #f9fafb; }
+    .ml-tpl-info { flex: 1; min-width: 0; }
+    .ml-tpl-name {
+      font-size: 13px; font-weight: 600; color: #111827;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .ml-tpl-preview {
+      font-size: 11px; color: #6b7280; margin-top: 2px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .ml-tpl-row-actions { display: flex; gap: 4px; flex-shrink: 0; }
+    .ml-tpl-row-actions button {
+      background: none; border: 1px solid transparent; border-radius: 4px;
+      padding: 4px 8px; font-size: 11px; cursor: pointer; color: #6b7280;
+    }
+    .ml-tpl-row-actions button:hover { background: #f3f4f6; color: #111827; }
+    .ml-tpl-row-actions .ml-tpl-delete-btn:hover { color: #dc2626; }
+    .ml-tpl-empty {
+      padding: 32px 16px; text-align: center; color: #9ca3af; font-style: italic; font-size: 13px;
+    }
   `;
 
   // ─── Helpers ──────────────────────────────────────────────────────────────
@@ -276,6 +332,54 @@
     t.textContent = message;
     document.body.appendChild(t);
     setTimeout(() => t.remove(), ms);
+  }
+
+  // ─── Note Template storage (localStorage, per-browser-profile) ────────────
+  const TPL_STORAGE_KEY = 'mlNoteTemplates';
+
+  function loadTemplates() {
+    try {
+      const raw = localStorage.getItem(TPL_STORAGE_KEY);
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (e) {
+      console.error('[ML-Tools] Failed to load templates', e);
+      return [];
+    }
+  }
+
+  function saveTemplates(arr) {
+    try {
+      localStorage.setItem(TPL_STORAGE_KEY, JSON.stringify(arr));
+      return true;
+    } catch (e) {
+      console.error('[ML-Tools] Failed to save templates', e);
+      showToast('Failed to save template');
+      return false;
+    }
+  }
+
+  function addTemplate(name, html) {
+    const templates = loadTemplates();
+    templates.push({
+      id: String(Date.now()) + Math.random().toString(36).slice(2, 8),
+      name: name.trim(),
+      html,
+      createdAt: Date.now()
+    });
+    return saveTemplates(templates);
+  }
+
+  function deleteTemplate(id) {
+    return saveTemplates(loadTemplates().filter(t => t.id !== id));
+  }
+
+  function renameTemplate(id, newName) {
+    const templates = loadTemplates();
+    const t = templates.find(t => t.id === id);
+    if (!t) return false;
+    t.name = newName.trim();
+    return saveTemplates(templates);
   }
 
   function getKendoWidget() {
@@ -446,6 +550,174 @@
       mo.observe(document.body, { childList: true, subtree: true });
       const timer = setTimeout(() => { mo.disconnect(); reject(new Error('Editor not found')); }, timeoutMs);
     });
+  }
+
+  // ─── Note Template handlers ───────────────────────────────────────────────
+  async function getOpenEditorDoc() {
+    const frame = document.querySelector('#commentEditor iframe');
+    const doc = frame?.contentDocument || frame?.contentWindow?.document;
+    if (doc?.body && doc.body.getAttribute('contenteditable')) return doc;
+    return null;
+  }
+
+  async function ensureEditorOpen() {
+    let doc = await getOpenEditorDoc();
+    if (doc) return doc;
+    const addBtn = document.querySelector('.addNoteButton');
+    if (!addBtn) return null;
+    addBtn.click();
+    try { return await waitForNoteEditor(); }
+    catch { return null; }
+  }
+
+  async function saveTemplateFromEditor() {
+    const doc = await getOpenEditorDoc();
+    if (!doc) { showToast('Open the note editor and write something first.'); return; }
+
+    const html  = doc.body.innerHTML.trim();
+    const plain = (doc.body.textContent || '').trim();
+    if (!plain) { showToast('Editor is empty — nothing to save.'); return; }
+
+    const name = prompt('Save this template as:', '');
+    if (name === null) return; // cancelled
+    if (!name.trim()) { showToast('Template name cannot be empty.'); return; }
+
+    if (addTemplate(name, html)) showToast('Template saved.');
+  }
+
+  async function insertTemplate(html) {
+    const doc = await ensureEditorOpen();
+    if (!doc) { showToast('Could not open the note editor'); return; }
+
+    // Draft protection — same pattern as Duplicate
+    if (doc.body.textContent.trim().length > 0 &&
+        !confirm('The editor already has content. Overwrite with this template?')) {
+      return;
+    }
+    doc.body.innerHTML = html;
+  }
+
+  function openTemplatePicker() {
+    document.getElementById('ml-tpl-modal-overlay')?.remove();
+
+    const overlay = document.createElement('div');
+    overlay.id = 'ml-tpl-modal-overlay';
+    overlay.setAttribute('role', 'dialog');
+    overlay.setAttribute('aria-modal', 'true');
+    overlay.setAttribute('aria-labelledby', 'ml-tpl-modal-title');
+
+    overlay.innerHTML = `
+      <div id="ml-tpl-modal">
+        <h3 id="ml-tpl-modal-title">📚 Note Templates</h3>
+        <input type="text" id="ml-tpl-search" placeholder="Search templates..." autocomplete="off" aria-label="Search templates">
+        <div class="ml-tpl-list" id="ml-tpl-list" role="list"></div>
+        <div class="ml-modal-footer">
+          <span style="font-size:12px;color:#6b7280;" id="ml-tpl-count"></span>
+          <div class="ml-modal-actions">
+            <button class="ml-btn-cancel" id="ml-tpl-cancel" type="button">Close</button>
+          </div>
+        </div>
+      </div>
+    `;
+
+    document.body.appendChild(overlay);
+
+    const listEl   = document.getElementById('ml-tpl-list');
+    const searchEl = document.getElementById('ml-tpl-search');
+    const countEl  = document.getElementById('ml-tpl-count');
+
+    const close = () => {
+      document.removeEventListener('keydown', onKey);
+      overlay.remove();
+    };
+    const onKey = (e) => { if (e.key === 'Escape') close(); };
+    document.addEventListener('keydown', onKey);
+    document.getElementById('ml-tpl-cancel').onclick = close;
+    overlay.onclick = (e) => { if (e.target === overlay) close(); };
+
+    function render(filter = '') {
+      const term = filter.toLowerCase();
+      const templates = loadTemplates()
+        .filter(t => !term || t.name.toLowerCase().includes(term))
+        .sort((a, b) => a.name.localeCompare(b.name));
+
+      listEl.innerHTML = '';
+      countEl.textContent = templates.length === 1
+        ? '1 template'
+        : templates.length + ' templates';
+
+      if (!templates.length) {
+        const empty = document.createElement('div');
+        empty.className = 'ml-tpl-empty';
+        empty.textContent = filter
+          ? 'No templates match your search.'
+          : 'No templates yet. Use 💾 Save Template after writing a note.';
+        listEl.appendChild(empty);
+        return;
+      }
+
+      templates.forEach(t => {
+        const row = document.createElement('div');
+        row.className = 'ml-tpl-row';
+        row.setAttribute('role', 'listitem');
+
+        const info = document.createElement('div');
+        info.className = 'ml-tpl-info';
+
+        const name = document.createElement('div');
+        name.className = 'ml-tpl-name';
+        name.textContent = t.name;
+
+        const preview = document.createElement('div');
+        preview.className = 'ml-tpl-preview';
+        const previewDoc = new DOMParser().parseFromString(t.html || '', 'text/html');
+        preview.textContent = (previewDoc.body.textContent || '').trim().slice(0, 90) || '(empty)';
+
+        info.append(name, preview);
+
+        const actions = document.createElement('div');
+        actions.className = 'ml-tpl-row-actions';
+
+        const renameBtn = document.createElement('button');
+        renameBtn.type = 'button';
+        renameBtn.className = 'ml-tpl-rename-btn';
+        renameBtn.title = 'Rename';
+        renameBtn.textContent = '✎';
+        renameBtn.onclick = (e) => {
+          e.stopPropagation();
+          const newName = prompt('Rename template:', t.name);
+          if (newName === null) return;
+          if (!newName.trim()) { showToast('Name cannot be empty.'); return; }
+          if (renameTemplate(t.id, newName)) render(searchEl.value);
+        };
+
+        const deleteBtn = document.createElement('button');
+        deleteBtn.type = 'button';
+        deleteBtn.className = 'ml-tpl-delete-btn';
+        deleteBtn.title = 'Delete';
+        deleteBtn.textContent = '✕';
+        deleteBtn.onclick = (e) => {
+          e.stopPropagation();
+          if (!confirm('Delete template "' + t.name + '"?')) return;
+          if (deleteTemplate(t.id)) render(searchEl.value);
+        };
+
+        actions.append(renameBtn, deleteBtn);
+        row.append(info, actions);
+
+        // Click anywhere else on the row → insert
+        row.onclick = async () => {
+          close();
+          await insertTemplate(t.html);
+        };
+
+        listEl.appendChild(row);
+      });
+    }
+
+    searchEl.addEventListener('input', () => render(searchEl.value));
+    render();
+    setTimeout(() => searchEl.focus(), 50);
   }
 
   // ─── Copy to Tasks Modal ──────────────────────────────────────────────────
@@ -655,6 +927,31 @@
     };
   }
 
+  // ─── Inject template buttons next to the native Add Note button ──────────
+  function injectTemplateButtons() {
+    const addBtn = document.querySelector('.addNoteButton');
+    if (!addBtn || addBtn.dataset.mlTplWired) return;
+    addBtn.dataset.mlTplWired = '1';
+
+    const wrap = document.createElement('span');
+    wrap.className = 'ml-tpl-actions-wrap';
+
+    const saveBtn = document.createElement('button');
+    saveBtn.type = 'button';
+    saveBtn.className = 'ml-note-btn';
+    saveBtn.textContent = '💾 Save Template';
+    saveBtn.onclick = saveTemplateFromEditor;
+
+    const insertBtn = document.createElement('button');
+    insertBtn.type = 'button';
+    insertBtn.className = 'ml-note-btn';
+    insertBtn.textContent = '📚 Templates';
+    insertBtn.onclick = openTemplatePicker;
+
+    wrap.append(saveBtn, insertBtn);
+    addBtn.insertAdjacentElement('afterend', wrap);
+  }
+
   // ─── Inject buttons into each note ────────────────────────────────────────
   function injectNoteButtons(container) {
     if (container.querySelector('.ml-note-actions')) return;
@@ -804,6 +1101,7 @@
     let pending = false;
     const scan = () => {
       installPushHook(); // idempotent — only hooks each dataSource once
+      injectTemplateButtons(); // idempotent via dataset.mlTplWired
       document.querySelectorAll('.commentContainer.commentIdentifier').forEach(injectNoteButtons);
     };
 
