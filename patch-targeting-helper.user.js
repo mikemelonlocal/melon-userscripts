@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Patch Targeting Helper – Bulk Add + Bulk Remove (Targets) + Bulk Move (BudgetDetails ListBoxes)
 // @namespace    http://tampermonkey.net/
-// @version      3.4.2
+// @version      3.4.3
 // @description  Inline bulk Add/Remove for Edit Advertising Targets (County/City/Zip) + Bulk Move for Kendo ListBoxes on BudgetDetails screens. Validation counts, live progress, retried API calls. Optional zip coverage analysis vs. City/County/DMA/State.
 // @match        https://thepatch.melonlocal.com/*
 // @run-at       document-end
@@ -18,7 +18,7 @@
   // CONSTANTS
   // ============================================================
 
-  const VERSION = "patch-targeting-helper-bulk-v3.4.2";
+  const VERSION = "patch-targeting-helper-bulk-v3.4.3";
   const DEBUG = false;
 
   const ZIP_GEO = {
@@ -270,6 +270,8 @@
         border-radius: 6px; padding: 8px 10px; font-size: 12px; color: ${COLORS.coconut};
         max-height: 360px; overflow-y: auto;
         overscroll-behavior: contain;
+        scrollbar-width: thin;
+        scrollbar-color: ${COLORS.mojave} transparent;
       }
       .patch-coverage-results[hidden] { display: none !important; }
       .patch-coverage-results::-webkit-scrollbar { width: 8px; }
@@ -928,6 +930,23 @@
       let isRunning = false;
       let isCancelled = false;
 
+      // Keyboard shortcut: Cmd/Ctrl+Enter triggers the primary action button.
+      const isMac = /Mac|iPhone|iPad|iPod/i.test(navigator.userAgent);
+      const shortcutLabel = isMac ? "⌘+Enter" : "Ctrl+Enter";
+      const primaryActionBtn = actionButtons[0];
+      if (primaryActionBtn) {
+        primaryActionBtn.title = `${shortcutLabel} to run`;
+        textarea.title = `${shortcutLabel} to run the primary action`;
+      }
+      textarea.addEventListener("keydown", (e) => {
+        if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+          e.preventDefault();
+          if (primaryActionBtn && !primaryActionBtn.disabled && !isRunning) {
+            primaryActionBtn.click();
+          }
+        }
+      });
+
       const closeOrCancel = () => {
         if (isRunning) {
             isCancelled = true;
@@ -1010,6 +1029,21 @@
     const results = document.createElement("div");
     results.className = "patch-coverage-results";
     results.hidden = !checkbox.checked;
+    // Delegated click for the "Copy missing" buttons — survives every render
+    // because results.innerHTML is replaced but the container itself is stable.
+    results.addEventListener("click", async (e) => {
+      const btn = e.target.closest(".patch-coverage-copy");
+      if (!btn || !results.contains(btn)) return;
+      e.preventDefault();
+      try {
+        await navigator.clipboard.writeText((btn.dataset.zips || "").replace(/,/g, "\n"));
+        const orig = btn.textContent;
+        btn.textContent = "✓ Copied";
+        setTimeout(() => { btn.textContent = orig; }, 1500);
+      } catch (err) {
+        btn.textContent = "Copy failed";
+      }
+    });
 
     const btnRow = panel.querySelector(`.${PANEL_IDS.inlinePanelClass}-button-row`);
     panel.insertBefore(toggleLabel, btnRow);
@@ -1095,15 +1129,7 @@
     }).join("");
 
     box.innerHTML = header + warn + `<ul class="patch-coverage-list">${rows}</ul>`;
-    box.querySelectorAll(".patch-coverage-copy").forEach((btn) => {
-      btn.addEventListener("click", async (e) => {
-        e.preventDefault();
-        try {
-          await navigator.clipboard.writeText((btn.dataset.zips || "").replace(/,/g, "\n"));
-          const orig = btn.textContent; btn.textContent = "✓ Copied"; setTimeout(() => { btn.textContent = orig; }, 1500);
-        } catch (err) { btn.textContent = "Copy failed"; }
-      });
-    });
+    // Copy-button clicks are handled via delegation on `box` in attachCoverageAnalysis.
   }
 
   function buildAddPanel(typeKey, pretty) {
