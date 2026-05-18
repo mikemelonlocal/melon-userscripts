@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Search Agent Shortcut
 // @namespace    https://thepatch.melonlocal.com/
-// @version      1.7
+// @version      1.8
 // @description  Modern Command Palette for Search Agent
 // @match        https://thepatch.melonlocal.com/*
 // @grant        none
@@ -197,8 +197,18 @@
     }
     const mod = isMac ? e.metaKey : e.ctrlKey;
     if (mod && e.code === 'KeyB') {
+      // Only intercept Cmd/Ctrl+B when this page actually has the Search Agent
+      // input (or the palette is open). Otherwise we'd swallow the browser's
+      // bookmarks-bar toggle on pages that don't host the field.
+      if (!document.getElementById(INPUT_ID) && !document.getElementById(MODAL_ID)) return;
       e.preventDefault();
       document.getElementById(MODAL_ID) ? closeModal() : openModal();
     }
   });
+
+  // Safety net: if the user navigates away while the palette is open, restore
+  // the input back to its original spot in the DOM before the page unloads.
+  // closeModal's wrapper-restore step is synchronous, so the navbar stays intact.
+  window.addEventListener('pagehide', closeModal);
+  window.addEventListener('beforeunload', closeModal);
 })();
