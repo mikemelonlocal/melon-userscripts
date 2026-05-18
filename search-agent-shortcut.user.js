@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Search Agent Shortcut
 // @namespace    https://thepatch.melonlocal.com/
-// @version      1.6
+// @version      1.7
 // @description  Modern Command Palette for Search Agent
 // @match        https://thepatch.melonlocal.com/*
 // @grant        none
@@ -196,7 +196,7 @@
       closeModal();
     }
     const mod = isMac ? e.metaKey : e.ctrlKey;
-    if (mod && e.code === 'KeyM') {
+    if (mod && e.code === 'KeyB') {
       e.preventDefault();
       document.getElementById(MODAL_ID) ? closeModal() : openModal();
     }
