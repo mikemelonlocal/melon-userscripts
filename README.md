@@ -205,7 +205,7 @@ To uninstall: open the Tampermonkey dashboard (browser toolbar icon → Dashboar
 **How to use:**
 - Open an agent's Dashboard. Each budget table gains a **Search** box and a **Show N entries** selector.
 - Click any column header to sort by it. The action-button column (last column) stays unsortable.
-- **Checkbox filters:** categorical columns (status, product, type, etc.) get collapsible filter panes above the table — check values to narrow rows, and the panes cascade so each selection refines the others. Columns with mostly-unique values (budget $ amounts, names) are skipped automatically.
+- **Checkbox filters:** categorical columns (Budget Type, Platform, etc.) get checkbox filter panes above the table — check values to narrow rows, and the panes cascade so each selection refines the others. Columns with mostly-unique values (Patch ID, descriptions, dates) are skipped automatically.
 - Tables load in their original row order; sorting/searching/filtering is opt-in per table.
 
 ---

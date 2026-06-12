@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MelonPatch - Searchable & Sortable Budget Tables
 // @namespace    https://thepatch.melonlocal.com/
-// @version      1.1
+// @version      1.2
 // @description  Adds DataTables search, sort, and per-column checkbox filters (SearchPanes) to Legacy Office Budget tables on the Agent Dashboard.
 // @author       You
 // @match        https://thepatch.melonlocal.com/Agents/Dashboard/*
@@ -36,9 +36,14 @@
     }
     .melon-table__container .dataTables_info,
     .melon-table__container .dataTables_paginate { margin-top: 6px; }
-    /* Keep the checkbox-filter panes compact so they don't dominate the page */
-    .melon-table__container .dtsp-searchPanes .dtsp-searchPane { max-width: 240px; }
-    .melon-table__container .dtsp-panesContainer { margin-bottom: 8px; }
+    /* Compact, card-styled filter panes that match the page */
+    .melon-table__container .dtsp-panesContainer { margin: 0 0 10px; box-shadow: none; }
+    .melon-table__container .dtsp-searchPane {
+      max-width: 260px; border: 1px solid #e3e3e3; border-radius: 8px; overflow: hidden;
+    }
+    .melon-table__container .dtsp-searchPane table { font-size: 13px; margin: 0; }
+    .melon-table__container .dtsp-searchPane div.dataTables_scrollBody { max-height: 190px; }
+    .melon-table__container .dtsp-titleRow .dtsp-title { font-weight: 600; }
   `);
 
   function initTable(table) {
@@ -72,19 +77,28 @@
       ],
       searchPanes: {
         // Auto-detect categorical columns: only build a pane when the share of
-        // unique values is at/below this threshold. Repetitive columns (status,
-        // product, type) get checkboxes; high-cardinality ones ($ amounts, names)
-        // are skipped automatically. Raise toward 1 to show more panes.
+        // unique values is at/below this threshold. Repetitive columns (Budget
+        // Type, Platform) get checkboxes; high-cardinality ones (Patch ID,
+        // descriptions, dates) are skipped. Raise toward 1 to show more panes.
         threshold: 0.6,
-        cascadePanes: true,   // filtering one pane narrows the others' options
-        viewTotal: true,      // show match counts next to each value
-        initCollapsed: true,  // panes start collapsed to stay compact
-        layout: 'columns-3',
-        dtOpts: { select: { style: 'multi' }, paging: false },
+        cascadePanes: true,    // selecting a value narrows the other panes
+        viewTotal: true,       // show match counts next to each value
+        orderable: false,      // hide the A-Z / by-count sort buttons (noise)
+        collapse: false,       // panes stay open; no collapse-all bar
+        clear: false,          // no clear-all button — just uncheck values
+        initCollapsed: false,  // show the checkboxes, not an empty header
+        layout: 'columns-2',   // two panes sit side by side, no awkward gap
+        dtOpts: {
+          select: { style: 'multi' },
+          paging: false,
+          searching: false,    // no per-pane search box (the lists are short)
+          info: false,
+        },
       },
       language: {
         search: 'Search:',
         lengthMenu: 'Show _MENU_ entries',
+        searchPanes: { title: { _: '', 0: '' } }, // drop the "Filters Active - N" label
       }
     });
   }
