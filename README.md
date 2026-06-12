@@ -33,6 +33,7 @@ To uninstall: open the Tampermonkey dashboard (browser toolbar icon → Dashboar
 - [Daily Cap Calculator](#daily-cap-calculator)
 - [Bulk Campaign Patch Status](#bulk-campaign-patch-status)
 - [Patch Targeting Helper](#patch-targeting-helper)
+- [Searchable & Sortable Budget Tables](#melonpatch---searchable--sortable-budget-tables)
 
 **Patch — admin & navigation**
 - [Remove Ex-Employees from System Groups](#remove-ex-employees-from-system-groups)
@@ -192,6 +193,19 @@ To uninstall: open the Tampermonkey dashboard (browser toolbar icon → Dashboar
 - The script validates each entry, shows live progress, and retries failed API calls.
 - For coverage analysis: click **Analyze Zip Coverage** to see which ZIPs your current targeting misses.
 - Bulk Remove requires a confirmation dialog showing the exact list before deletion.
+
+---
+
+## MelonPatch - Searchable & Sortable Budget Tables
+
+**What it does:** Turns the Legacy Office budget tables into DataTables — adds a live search box, per-column sorting, and paging, so you can find a line item without scrolling the whole sheet.
+
+**Where it shows up:** Agent Dashboard (`Agents/Dashboard/*`). Applies to every `.budget-details-table` across all three tab panels.
+
+**How to use:**
+- Open an agent's Dashboard. Each budget table gains a **Search** box and a **Show N entries** selector.
+- Click any column header to sort by it. The action-button column (last column) stays unsortable.
+- Tables load in their original row order; sorting/searching is opt-in per table.
 
 ---
 

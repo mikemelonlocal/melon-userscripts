@@ -20,6 +20,7 @@ One-line reference for each script. Full how-to and install instructions: [READM
 - **Daily Cap Calculator** — Paces budgets through end of month. Shortcuts: `⌘/Ctrl + Enter` calculate · `⌘/Ctrl + K` add product · `⌘/Ctrl + M` minimize · `⌘/Ctrl + E` export.
 - **Bulk Campaign Patch Status** — On BudgetDetails, sticky toolbar to bulk Active/Inactive with undo buffer and per-row verification.
 - **Targeting Helper** — Bulk Add/Remove on Edit Advertising Targets (City/County/Zip) + Bulk Move on BudgetDetails Kendo list boxes. Optional zip coverage analysis.
+- **Searchable & Sortable Budget Tables** — Adds DataTables search, column sort, and paging to the Legacy Office budget tables on the Agent Dashboard.
 
 ## Patch — admin & navigation
 
