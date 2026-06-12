@@ -198,14 +198,15 @@ To uninstall: open the Tampermonkey dashboard (browser toolbar icon → Dashboar
 
 ## MelonPatch - Searchable & Sortable Budget Tables
 
-**What it does:** Turns the Legacy Office budget tables into DataTables — adds a live search box, per-column sorting, and paging, so you can find a line item without scrolling the whole sheet.
+**What it does:** Turns the Legacy Office budget tables into DataTables — adds a live search box, per-column sorting, paging, and checkbox filter panes (SearchPanes), so you can find or narrow line items without scrolling the whole sheet.
 
 **Where it shows up:** Agent Dashboard (`Agents/Dashboard/*`). Applies to every `.budget-details-table` across all three tab panels.
 
 **How to use:**
 - Open an agent's Dashboard. Each budget table gains a **Search** box and a **Show N entries** selector.
 - Click any column header to sort by it. The action-button column (last column) stays unsortable.
-- Tables load in their original row order; sorting/searching is opt-in per table.
+- **Checkbox filters:** categorical columns (status, product, type, etc.) get collapsible filter panes above the table — check values to narrow rows, and the panes cascade so each selection refines the others. Columns with mostly-unique values (budget $ amounts, names) are skipped automatically.
+- Tables load in their original row order; sorting/searching/filtering is opt-in per table.
 
 ---
 
